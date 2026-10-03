@@ -19,3 +19,4 @@ __pycache__
 # Local smoke-test logs and derived summaries.
 /experiments/smoke/output/
 /experiments/hybrid-lb/output/
+/config/smoke_clos_*.txt

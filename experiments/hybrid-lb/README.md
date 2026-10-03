@@ -16,13 +16,13 @@ Python 2.7.18 was built locally under the workspace's `.deps/python2` because th
 
 ## Workload and reporting
 
-- 16 hosts, 4 leaves with 4 hosts each, 4 spines; all links 400 Gbps and 500 ns propagation.
-- 240 all-to-all collective flows of 1 MiB, starting together.
-- Short-flow bytes = 10% of collective bytes; 2472 short flows with seed 13. This is a byte ratio, not a calibrated fraction of link capacity.
+- Default topology: 2 leaves, 64 NICs per leaf, and 64 spines; all links are 400 Gbps with 500 ns propagation. `--leaves` changes only the number of leaves; the downlink and uplink fanout remain 64.
+- The default workload uses 16 active hosts, producing 240 all-to-all collective flows of 1 MiB, starting together. `--active-hosts` can scale the workload independently up to `leaves * 64` NICs.
+- Short-flow bytes = 10% of collective bytes. This is a byte ratio, not a calibrated fraction of link capacity.
 - Short sizes/arrival draws preserve the htsim runner's RNG sequence. Its `start` field is picoseconds: arrivals occupy 0–0.5 microseconds. ns-3 rounds timestamps to nanoseconds. Absolute start is shifted to 1 second.
 - All data uses the same priority group (3). Collective flows use the selected LB; short flows explicitly select ECMP. ACK/control routing remains ECMP.
 - JCT = last collective completion minus common collective start. Short flow completion is checked but not included in JCT.
-- Every run must finish all 2712 flows, return one unique data acknowledgment per packet, preserve short-flow LB=ECMP, and have zero ingress/egress admission drops. Otherwise the runner fails instead of publishing a complete comparison.
+- Every run must finish every generated flow, return one unique data acknowledgment per packet, preserve short-flow LB=ECMP, and have zero ingress/egress admission drops. Otherwise the runner fails instead of publishing a complete comparison.
 
 ## Network/CC configuration
 
@@ -40,19 +40,9 @@ Python 2.7.18 was built locally under the workspace's `.deps/python2` because th
 - MP-RDMA (`14`): random UDP source-port VPs, echoed VP and delivered sequence, out-of-order pruning with delta=32 packets, ACK-clock budget at most two packets and subject to available cwnd, at most one 1% probe trial per base RTT, retransmissions reuse their recorded VP. A base-RTT timer releases random-VP traffic when no clock credits remain. VPs are ECMP hash inputs, **not guaranteed one-to-one physical paths**.
 - REPS (`11`, mode 14): 16-bit entropy, eight-entry clean-ACK ring, consume oldest valid entry, random exploration when empty, initialized-entry-only frozen recycling, 100 us freeze deadline, clean-ACK-triggered exit, and cwnd-sized exploration after exit. Initial exploration happens naturally while there is no returning clean feedback.
 
-## Corrected matrix
+## Results
 
-Collective JCT in microseconds (seed 13):
-
-| Short-flow load | ECMP | CONGA | MP-RDMA | REPS |
-| ---: | ---: | ---: | ---: | ---: |
-| 0% | 484.417 | 437.856 | 364.566 | 356.523 |
-| 5% | 497.688 | 464.780 | 397.739 | 383.622 |
-| 10% | 514.617 | 476.738 | 412.427 | 391.663 |
-| 15% | 532.350 | 494.582 | 435.244 | 413.101 |
-| 20% | 542.347 | 506.849 | 449.646 | 424.265 |
-
-All runs completed every flow with zero admission drops and zero retransmission timeouts. At 10%, correcting CONGA changes JCT from 598.274 to 476.738 microseconds and pause events from 2310 to 34; the other schemes retain their previous results.
+The previous 4-spine result matrix is intentionally not presented as a result for this runner. Re-run after changing `--leaves` or `--active-hosts`; the output manifest records both topology and workload scale.
 
 ## Limits
 

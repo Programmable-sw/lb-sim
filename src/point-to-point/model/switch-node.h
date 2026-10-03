@@ -17,7 +17,9 @@ class Packet;
 
 class SwitchNode : public Node {
     static const unsigned qCnt = 8;    // Number of queues/priorities used
-    static const unsigned pCnt = 128;  // port 0 is not used so + 1	// Number of ports used
+    // ns-3 device indices start at one for physical ports.  A 64-downlink,
+    // 64-uplink leaf therefore addresses index 128 as well as index zero.
+    static const unsigned pCnt = 129;
     uint32_t m_ecmpSeed;
     std::unordered_map<uint32_t, std::vector<int> >
         m_rtTable;  // map from ip address (u32) to possible ECMP port (index of dev)

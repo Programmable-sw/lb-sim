@@ -126,6 +126,7 @@ topo2bdp = {
     "leaf128_spine64_100G_OS1": 104000,
     "leaf64_spine32_100G_OS1": 104000, 
     "leaf32_spine16_100G_OS1": 104000,
+    "smoke_clos_": 104000,
     "fat_k8_100G_OS2": 156000,  # 3-tier -> all 100Gbps
     "fat_k4_100G_OS2": 156000,
 }
@@ -372,10 +373,13 @@ def main():
         ))
 
     # 1 BDP calculation
-    if topo2bdp.get(topo) == None:
+    bdp = topo2bdp.get(topo)
+    if bdp is None and topo.startswith("smoke_clos_"):
+        bdp = topo2bdp["smoke_clos_"]
+    if bdp is None:
         print("ERROR - topology is not registered in run.py!!", flush=True)
         return
-    bdp = int(topo2bdp[topo])
+    bdp = int(bdp)
     print("1BDP = {}".format(bdp))
 
     # DCQCN parameters (NOTE: HPCC's 400KB/1600KB is too large, although used in Microsoft)

@@ -21,7 +21,7 @@ def load_runner():
 def main():
     runner = load_runner()
     assert runner.SCHEMES == ("reps", "dtor", "glb")
-    assert runner.DEFAULT_TOPOLOGY == "leaf_spine_128_100G_OS2"
+    assert runner.DEFAULT_LEAF_COUNT == 2
     environment = runner.waf_environment({"PATH": "/usr/bin"}, "/opt/python2/bin")
     assert environment["PATH"] == "/opt/python2/bin:/usr/bin"
 
@@ -41,7 +41,7 @@ def main():
         assert command[command.index("--pfc") + 1] == "1"
         assert command[command.index("--netload") + 1] == "50"
         assert command[command.index("--seed") + 1] == "13"
-        assert command[command.index("--topo") + 1] == runner.DEFAULT_TOPOLOGY
+        assert command[command.index("--topo") + 1] == "smoke_clos_2leaf_64nic_64spine_100G_OS1"
     print("REPS/dToR/GLB smoke runner contract passed")
 
 

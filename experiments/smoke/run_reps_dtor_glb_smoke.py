@@ -4,12 +4,20 @@ import argparse
 import csv
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "experiments"))
+from clos_topology import build_two_tier_clos
+
 SCHEMES = ("reps", "dtor", "glb")
-DEFAULT_TOPOLOGY = "leaf_spine_128_100G_OS2"
+DEFAULT_LEAF_COUNT = 2
+
+
+def topology_name(leaf_count):
+    return "smoke_clos_{}leaf_64nic_64spine_100G_OS1".format(leaf_count)
 
 
 def parse_args(argv=None):
@@ -18,7 +26,7 @@ def parse_args(argv=None):
                         default=ROOT / "experiments/smoke/output/reps-dtor-glb")
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument("--netload", type=int, default=50)
-    parser.add_argument("--topo", default=DEFAULT_TOPOLOGY)
+    parser.add_argument("--leaves", type=int, default=DEFAULT_LEAF_COUNT)
     parser.add_argument("--simul-time", default="0.1")
     parser.add_argument(
         "--waf-python-bin", type=Path,
@@ -37,6 +45,7 @@ def waf_environment(environment, python_bin):
 
 
 def build_specs(args):
+    topo = topology_name(args.leaves)
     specs = []
     for scheme in SCHEMES:
         run_id = "smoke-{scheme}-seed{seed}-load{load}".format(
@@ -44,7 +53,7 @@ def build_specs(args):
         command = [
             "python3", "run.py", "--lb", scheme,
             "--irn", "1", "--pfc", "1",
-            "--seed", str(args.seed), "--netload", str(args.netload), "--topo", args.topo,
+            "--seed", str(args.seed), "--netload", str(args.netload), "--topo", topo,
             "--simul_time", args.simul_time, "--id", run_id,
         ]
         specs.append({"scheme": scheme, "run_id": run_id, "command": command})
@@ -77,6 +86,8 @@ def main(argv=None):
             "--waf-python-bin or set NS3_WAF_PYTHON_BIN".format(
                 args.waf_python_bin / "python"))
     environment = waf_environment(os.environ, args.waf_python_bin)
+    topology_path = ROOT / "config" / (topology_name(args.leaves) + ".txt")
+    topology_path.write_text(build_two_tier_clos(args.leaves), encoding="utf-8")
     output.mkdir(parents=True, exist_ok=True)
     rows = []
     for spec in specs:
