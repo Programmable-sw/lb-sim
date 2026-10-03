@@ -179,7 +179,7 @@ def build_command(case, artifact, sim, case_dir):
 def config_ok(text, case, returncode):
     required = (
         f"lb mode {case.variant.lb}",
-        "cc mode dcqcn_variant",
+        "cc mode dctcp_variant",
         "RoCE receive mode sp",
         "RoCE SACK bitmap 64 bits",
         "RoCE TRIM recovery mode exact",

@@ -41,7 +41,7 @@ def main():
     assert_contains(main_roce, "LB_NETAWARE", "main_roce NetAware mode")
     assert_contains(main_roce, "NetAware default queue_type composite_ecn_lb", "NetAware queue default")
     assert_contains(main_roce, "NetAware default receive mode sp", "NetAware RX default")
-    assert_contains(main_roce, "NetAware default cc dcqcn_variant", "NetAware CC default")
+    assert_contains(main_roce, "NetAware default cc dctcp_variant", "NetAware CC default")
     assert_absent(main_roce, "-netaware_feedback_pkts", "fixed NetAware feedback cadence")
     assert_absent(main_roce, "-netaware_feedback_min_us", "fixed NetAware feedback cadence")
     assert_absent(main_roce, "-netaware_feedback_max_us", "fixed NetAware feedback cadence")

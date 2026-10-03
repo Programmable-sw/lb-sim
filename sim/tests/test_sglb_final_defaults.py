@@ -14,7 +14,7 @@ def run(traffic, output, extra_args):
         str(BINARY), "-o", str(output), "-tm", str(traffic),
         "-nodes", "256", "-conns", "0", "-tiers", "2", "-lb", "sglb",
         "-queue_type", "composite_ecn_lb", "-host_queue_type", "prio",
-        "-cc", "dcqcn_variant", "-end", "1", "-linkspeed", "400000",
+        "-cc", "dctcp_variant", "-end", "1", "-linkspeed", "400000",
         "-paths", "64",
         *extra_args,
     ]

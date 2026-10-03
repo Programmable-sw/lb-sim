@@ -201,7 +201,7 @@ def build_sglb_command(sim, traffic, output, connections, seed=SEED):
         "-end", "40000",
         "-paths", "64",
         "-seed", str(seed),
-        "-cc", "dcqcn_variant",
+        "-cc", "dctcp_variant",
         "-roce_rx_mode", "sp",
         "-roce_sack_bitmap_bits", "64",
         "-roce_transport_semantics", "mrc_exact_bounded",
@@ -303,7 +303,7 @@ def sglb_cell_dir(out, load):
 def validate_sglb_text(text, connections):
     required = (
         "lb mode sglb",
-        "cc mode dcqcn_variant",
+        "cc mode dctcp_variant",
         "RoCE receive mode sp",
         "RoceTransportConfig semantics=mrc_exact_bounded",
         "SGLB effective config: score mode nmrc_quantized_topk, "

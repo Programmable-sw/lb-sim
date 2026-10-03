@@ -82,7 +82,7 @@ def build_command(sim, scheme, traffic, output, connections, seed):
         "-end", "10000",
         "-paths", "64",
         "-seed", str(seed),
-        "-cc", "dcqcn_variant",
+        "-cc", "dctcp_variant",
         "-roce_rx_mode", "sp",
         "-roce_sack_bitmap_bits", "64",
         "-roce_transport_semantics", "mrc_exact_bounded",

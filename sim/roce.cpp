@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstring>
 #include "roce.h"
+#include "conga_model.h"
 #include "queue.h"
 #include <stdio.h>
 #include "switch.h"
@@ -92,7 +93,14 @@ RoceSrc::nmrc_all_cooling_policy_t RoceSrc::_nmrc_all_cooling_policy =
     RoceSrc::NMRC_ALL_COOLING_EARLIEST;
 uint32_t RoceSrc::_reps_buffer_size = 8;
 uint32_t RoceSrc::_reps_warmup_pkts = 0;
+// REPS stores a 16-bit entropy value (e.g. UDP source port) and relies on
+// the fabric ECMP hash to map that value to one of the physical paths.
+static const uint32_t REPS_EV_SPACE = 1u << 16;
 uint32_t RoceSrc::_hosts_per_tor = 1;
+uint32_t RoceSrc::_conga_uplinks = 1;
+std::map<std::pair<uint32_t, uint32_t>, std::vector<uint32_t> >
+    RoceSrc::_conga_shared_uplink_scores;
+std::map<uint32_t, std::vector<uint32_t> > RoceSrc::_conga_local_uplink_scores;
 simtime_picosec RoceSrc::_mrc_failed_retry = timeFromUs(100.0);
 uint32_t RoceSrc::_mrc_probe_interval_pkts = 256;
 bool RoceSrc::_mrc_failure_recovery_enabled = false;
@@ -100,7 +108,7 @@ uint32_t RoceSrc::_mrc_probe_success_threshold = 3;
 simtime_picosec RoceSrc::_conweave_rtt_threshold = timeFromUs(16.0);
 simtime_picosec RoceSrc::_conweave_min_reroute_gap = timeFromUs(4.0);
 uint32_t RoceSrc::_ndp_initial_window = 256;
-RoceSrc::cc_mode_t RoceSrc::_cc_mode = RoceSrc::CC_DCQCN_VARIANT;
+RoceSrc::cc_mode_t RoceSrc::_cc_mode = RoceSrc::CC_DCTCP_VARIANT;
 RoceSrc::trim_recovery_mode_t RoceSrc::_trim_recovery_mode =
     RoceSrc::TRIM_RECOVERY_EXACT_PSN;
 uint32_t RoceSrc::_cc_initial_cwnd_pkts = 100;
@@ -436,9 +444,24 @@ RoceSrc::RoceSrc(RoceLogger* logger, TrafficLogger* pktlogger, EventList &eventl
     _nodename = "rocesrc " + to_string(_node_num);
 
     _pathid = random()%256;
+    _mprdma_last_vp = _pathid;
+    _mprdma_snd_ooh = 0;
+    _mprdma_ool_delta_pkts = 32;
+    _mprdma_send_count = 0;
+    _mprdma_last_probe = 0;
+    _mprdma_ack_valid = false;
+    _mprdma_pruned.clear();
+    _mprdma_seq_vp.clear();
+    _mprdma_ack_clock.clear();
+    _conga_flowlet_path = UINT32_MAX;
+    _conga_last_send = timeInf;
     _reps_head = 0;
     _reps_valid_count = 0;
     _reps_explore_remaining = 0;
+    _reps_current_ev = random() % REPS_EV_SPACE;
+    _reps_selected_ev = _reps_current_ev;
+    _reps_freezing = false;
+    _reps_freezing_until = 0;
     reset_reps_buffer();
     _ndp_cursor = 0;
     _ndp_pull_credit = 0;
@@ -466,6 +489,16 @@ RoceSrc::RoceSrc(RoceLogger* logger, TrafficLogger* pktlogger, EventList &eventl
     _rtx_queue.clear();
     reset_sack_recovery_state();
     reset_congestion_control();
+    _mprdma_last_vp = _pathid;
+    _mprdma_snd_ooh = 0;
+    _mprdma_send_count = 0;
+    _mprdma_last_probe = 0;
+    _mprdma_ack_valid = false;
+    _mprdma_pruned.clear();
+    _mprdma_seq_vp.clear();
+    _mprdma_ack_clock.clear();
+    _conga_flowlet_path = UINT32_MAX;
+    _conga_last_send = timeInf;
 
     //cout << _nodename << " path id is " << _pathid << endl;
 
@@ -672,7 +705,7 @@ void RoceSrc::update_congestion_control_on_ack(const RoceAck& ack, double newly_
         return;
 
     bool suppress_duplicate_inflate =
-        _cc_mode == CC_DCQCN_VARIANT_NODUP_OLD &&
+        _cc_mode == CC_DCTCP_VARIANT_NODUP_OLD &&
         ack.is_old_duplicate_ack();
     if (suppress_duplicate_inflate)
         _duplicate_ack_inflate_suppressed++;
@@ -1136,6 +1169,8 @@ void RoceSrc::connect(Route* routeout, Route* routeback, RoceSink& sink, simtime
 void RoceSrc::processNack(const RoceNack& nack){
     RoceNack::seq_t ackno = nack.ackno();
     trace_cc_state("nack_pre", ackno, (int)nack.reason());
+    if (nack.reason() == RoceNack::LOSS || nack.reason() == RoceNack::TRIM)
+        detect_reps_failure();
     if (nack.has_stor_feedback())
         _feedback_nacks_received++;
     switch (nack.reason()) {
@@ -1419,6 +1454,7 @@ void RoceSrc::processAck(const RoceAck& ack) {
                    ack.is_old_duplicate_ack(), ack.flags() & ECN_ECHO,
                    newly_acked_pkts);
     update_reps(ack);
+    update_mprdma(ack);
     update_conweave(ack, m);
     update_stor(ack);
     update_netaware(ack);
@@ -1483,6 +1519,30 @@ std::pair<uint32_t, uint32_t> RoceSrc::tor_pair_cache_key() const {
 
 void RoceSrc::resetStorSharedState() {
     _stor_shared_profiles.clear();
+}
+
+void RoceSrc::resetCongaSharedState() {
+    _conga_shared_uplink_scores.clear();
+    _conga_local_uplink_scores.clear();
+}
+
+void RoceSrc::updateCongaLocalMetric(uint32_t source_tor, uint32_t uplink,
+                                    uint32_t metric) {
+    const uint32_t uplinks = _conga_uplinks ? _conga_uplinks : 1;
+    std::vector<uint32_t>& scores = _conga_local_uplink_scores[source_tor];
+    if (scores.size() != uplinks)
+        scores.assign(uplinks, 0);
+    scores[uplink % uplinks] = metric;
+}
+
+uint32_t RoceSrc::congaRemoteMetric(uint32_t source_tor, uint32_t destination_tor,
+                                    uint32_t uplink) {
+    const uint32_t uplinks = _conga_uplinks ? _conga_uplinks : 1;
+    std::map<std::pair<uint32_t, uint32_t>, std::vector<uint32_t> >::const_iterator it =
+        _conga_shared_uplink_scores.find(std::make_pair(source_tor, destination_tor));
+    if (it == _conga_shared_uplink_scores.end() || it->second.size() != uplinks)
+        return 0;
+    return it->second[uplink % uplinks];
 }
 
 void RoceSrc::resetNetawareSharedState() {
@@ -3233,9 +3293,17 @@ uint32_t RoceSrc::choose_path(Packet::PktPriority priority, bool retransmitted) 
 
     if (_flow_lb_mode == LB_REPS) {
         ensure_reps_buffer();
+        const uint32_t ev_space = REPS_EV_SPACE;
         if (!retransmitted && _reps_explore_remaining > 0) {
             _reps_explore_remaining--;
-            uint32_t path = random() % path_space;
+            // Algorithm 2 refreshes the exploratory EV once per REPS buffer
+            // width; intervening packets retain the current EV.
+            if ((_reps_explore_remaining % _reps_buffer.size()) == 0)
+                _reps_current_ev = random() % ev_space;
+            _reps_selected_ev = _reps_current_ev;
+            // This value is only a route placeholder between the endpoint and
+            // its ToR. The source ToR hashes the packet's full tuple.
+            uint32_t path = _reps_selected_ev % path_space;
             _reps_random_sends++;
             record_path_selection(path, path);
             sample_reps_buffer_occupancy();
@@ -3244,7 +3312,8 @@ uint32_t RoceSrc::choose_path(Packet::PktPriority priority, bool retransmitted) 
         if (_reps_valid_count > 0) {
             uint32_t offset = (_reps_head + _reps_buffer.size() - _reps_valid_count) % _reps_buffer.size();
             assert(_reps_buffer[offset].valid);
-            uint32_t path = _reps_buffer[offset].cached_ev;
+            _reps_selected_ev = _reps_buffer[offset].cached_ev % ev_space;
+            uint32_t path = _reps_selected_ev % path_space;
             _reps_buffer[offset].valid = false;
             _reps_valid_count--;
             path %= path_space;
@@ -3253,10 +3322,69 @@ uint32_t RoceSrc::choose_path(Packet::PktPriority priority, bool retransmitted) 
             sample_reps_buffer_occupancy();
             return path;
         }
-        uint32_t path = random() % path_space;
+        if (_reps_freezing && _reps_initialized_count > 0) {
+            // Algorithm 2 cycles through cached EVs once valid entries run
+            // out. A partially populated ring must skip unwritten slots.
+            while (!_reps_buffer[_reps_head].initialized)
+                _reps_head = (_reps_head + 1) % _reps_buffer.size();
+            uint32_t offset = _reps_head;
+            _reps_head = (_reps_head + 1) % _reps_buffer.size();
+            _reps_selected_ev = _reps_buffer[offset].cached_ev % ev_space;
+            uint32_t path = _reps_selected_ev % path_space;
+            _reps_random_sends++;
+            record_path_selection(path, path);
+            sample_reps_buffer_occupancy();
+            return path;
+        }
+        _reps_selected_ev = random() % ev_space;
+        uint32_t path = _reps_selected_ev % path_space;
         _reps_random_sends++;
         record_path_selection(path, path);
         sample_reps_buffer_occupancy();
+        return path;
+    }
+
+    if (_flow_lb_mode == LB_MPRDMA) {
+        uint32_t path = path_space == 1 ? 0 : (_mprdma_last_vp % path_space);
+        if (_mprdma_pruned.size() != path_space)
+            _mprdma_pruned.assign(path_space, false);
+        ++_mprdma_send_count;
+        // Probe at most once per measured RTT.  This models the paper's
+        // per-RTT 1% probe, rather than applying 1% to every send.
+        const simtime_picosec probe_rtt = _rtt ? _rtt : timeFromUs(1.0);
+        const bool probe_window = eventlist().now() >=
+            _mprdma_last_probe + probe_rtt;
+        if (!_mprdma_ack_valid || (probe_window && drand() < 0.01)) {
+            path = random() % path_space;
+            _mprdma_last_probe = eventlist().now();
+            if (!_mprdma_pruned.empty())
+                _mprdma_pruned[path] = false;
+        } else if (!_mprdma_ack_clock.empty()) {
+            path = _mprdma_ack_clock.front() % path_space;
+            _mprdma_ack_clock.pop_front();
+        } else if (_mprdma_pruned[path]) {
+            for (uint32_t i = 0; i < path_space; ++i) {
+                uint32_t candidate = (path + i + 1) % path_space;
+                if (!_mprdma_pruned[candidate]) {
+                    path = candidate;
+                    break;
+                }
+            }
+        } else if (_mprdma_ack_clock.empty()) {
+            // PaperMpr::Select falls back to a fresh VP when no ACK credit is
+            // available. Reusing the last VP creates a non-paper hot path.
+            path = random() % path_space;
+        }
+        record_path_selection(path, path);
+        return path;
+    }
+
+    if (_flow_lb_mode == LB_CONGA) {
+        // CONGA is a source-ToR mechanism. The endpoint only needs a route to
+        // its ToR; selecting a flowlet here consumed an extra random choice
+        // and was then overwritten by FatTreeSwitch.
+        const uint32_t path = _pathid % path_space;
+        record_path_selection(path, path);
         return path;
     }
 
@@ -3307,6 +3435,40 @@ uint32_t RoceSrc::choose_path(Packet::PktPriority priority, bool retransmitted) 
     return path;
 }
 
+void RoceSrc::update_mprdma(const RoceAck& ack) {
+    if (_flow_lb_mode != LB_MPRDMA)
+        return;
+    uint32_t path_space = _path_entropy_size ? _path_entropy_size : 1;
+    uint32_t vp = (ack.routing_entropy() == UINT32_MAX ?
+        ack.pathid() : ack.routing_entropy()) % path_space;
+    if (_mprdma_pruned.size() != path_space)
+        _mprdma_pruned.assign(path_space, false);
+    const bool has_ooo_signal = ack.has_delivered_psn();
+    const RocePacket::seq_t delivered = has_ooo_signal ?
+        ack.delivered_psn() : ack.ackno();
+    _mprdma_last_vp = vp;
+    _mprdma_ack_valid = true;
+    if (has_ooo_signal && delivered > _mprdma_snd_ooh)
+        _mprdma_snd_ooh = delivered;
+    const RocePacket::seq_t delta =
+        (RocePacket::seq_t)_mprdma_ool_delta_pkts * _mss;
+    const bool slow = has_ooo_signal && !ack.retransmitted_data() &&
+        _mprdma_snd_ooh > delta &&
+        delivered + delta < _mprdma_snd_ooh;
+    if (slow) {
+        _mprdma_pruned[vp] = true;
+        return;
+    }
+    _mprdma_pruned[vp] = false;
+    // One ACK clocks at most one normal data packet onto the echoed VP.
+    const int64_t available = (int64_t)floor(_cc_cwnd_pkts) -
+        (int64_t)_bounded_inflight_pkts - (int64_t)_mprdma_ack_clock.size();
+    const uint32_t credits = available > 0 ?
+        (uint32_t)std::min<int64_t>(2, available) : 0;
+    for (uint32_t i = 0; i < credits; ++i)
+        _mprdma_ack_clock.push_back(vp);
+}
+
 void RoceSrc::ensure_reps_buffer() {
     uint32_t size = _reps_buffer_size ? _reps_buffer_size : 1;
     if (_reps_buffer.size() == size)
@@ -3314,6 +3476,7 @@ void RoceSrc::ensure_reps_buffer() {
     _reps_buffer.assign(size, RepsBufferEntry());
     _reps_head = 0;
     _reps_valid_count = 0;
+    _reps_initialized_count = 0;
 }
 
 void RoceSrc::reset_reps_buffer() {
@@ -3321,7 +3484,19 @@ void RoceSrc::reset_reps_buffer() {
     _reps_buffer.assign(size, RepsBufferEntry());
     _reps_head = 0;
     _reps_valid_count = 0;
+    _reps_initialized_count = 0;
     _reps_explore_remaining = _reps_warmup_pkts;
+    _reps_current_ev = random() % REPS_EV_SPACE;
+    _reps_selected_ev = _reps_current_ev;
+    _reps_freezing = false;
+    _reps_freezing_until = 0;
+}
+
+void RoceSrc::detect_reps_failure() {
+    if (_flow_lb_mode != LB_REPS || _reps_freezing || _reps_explore_remaining)
+        return;
+    _reps_freezing = true;
+    _reps_freezing_until = eventlist().now() + timeFromUs(100.0);
 }
 
 void RoceSrc::update_reps(const RoceAck& ack) {
@@ -3334,13 +3509,23 @@ void RoceSrc::update_reps(const RoceAck& ack) {
     }
 
     ensure_reps_buffer();
-    uint32_t path_space = _path_entropy_size ? _path_entropy_size : 1;
     if (!_reps_buffer[_reps_head].valid)
         _reps_valid_count++;
-    _reps_buffer[_reps_head].cached_ev = ack.pathid() % path_space;
+    if (!_reps_buffer[_reps_head].initialized) {
+        _reps_buffer[_reps_head].initialized = true;
+        _reps_initialized_count++;
+    }
+    const uint32_t ev = (ack.routing_entropy() == UINT32_MAX ?
+        ack.pathid() : ack.routing_entropy()) % REPS_EV_SPACE;
+    _reps_buffer[_reps_head].cached_ev = ev;
     _reps_buffer[_reps_head].valid = true;
     _reps_head = (_reps_head + 1) % _reps_buffer.size();
     _reps_clean_ack_cached++;
+    // Algorithm 1 exits only on a clean ACK after the deadline.
+    if (_reps_freezing && eventlist().now() > _reps_freezing_until) {
+        _reps_freezing = false;
+        _reps_explore_remaining = (uint32_t)std::max(1.0, floor(_cc_cwnd_pkts));
+    }
     sample_reps_buffer_occupancy();
 }
 
@@ -3366,7 +3551,8 @@ void RoceSrc::update_conweave(const RoceAck& ack, simtime_picosec rtt) {
 }
 
 void RoceSrc::update_netaware(const RoceAck& ack) {
-    if (_flow_lb_mode != LB_NETAWARE || !ack.has_netaware_feedback())
+    if (_flow_lb_mode != LB_NETAWARE ||
+        !ack.has_netaware_feedback())
         return;
 
     uint32_t path_space = _path_entropy_size ? _path_entropy_size : 1;
@@ -3704,6 +3890,11 @@ bool RoceSrc::send_packet() {
         path = choice.ev;
         logical_ev = choice.ev;
         record_path_selection(choice.ev, choice.physical_path);
+    } else if (_flow_lb_mode == LB_MPRDMA && retransmitted) {
+        map<RocePacket::seq_t, uint32_t>::const_iterator it =
+            _mprdma_seq_vp.find(seqno);
+        path = it == _mprdma_seq_vp.end() ?
+            choose_path(p->priority(), true) : it->second;
     } else {
         path = choose_path(p->priority(), retransmitted);
         if (_flow_lb_mode == LB_RR)
@@ -3713,6 +3904,17 @@ bool RoceSrc::send_packet() {
         (_flow_lb_mode == LB_RR || mrc_path_state_enabled()))
         mrc_flow_note_new_selection(logical_ev);
     p->set_pathid(path);
+    if (_flow_lb_mode == LB_MPRDMA)
+        p->set_routing_entropy(path);
+    else if (_flow_lb_mode == LB_REPS)
+    {
+        p->set_routing_entropy(_reps_selected_ev);
+        p->set_reps_entropy(true);
+    }
+    if (_flow_lb_mode == LB_CONGA)
+        p->set_lbtag(path % (_conga_uplinks ? _conga_uplinks : 1));
+    if (_flow_lb_mode == LB_MPRDMA)
+        _mprdma_seq_vp[seqno] = path;
     if (logical_ev != UINT32_MAX)
         p->set_mrc_ev(logical_ev);
     trace_netaware_decision(seqno, path, p->priority());
@@ -3765,6 +3967,7 @@ void RoceSrc::rtx_timer_hook(simtime_picosec now, simtime_picosec period) {
              << " highest " << _highest_sent << endl;
     }
 
+    detect_reps_failure();
     _global_rto_count++;
     bool bounded_failure_accepted = false;
     if (_rx_mode == RX_SP_RETX_QUEUE) {
@@ -4164,15 +4367,22 @@ void RoceSink::send_ack(const RocePacket& pkt, simtime_picosec ts,
     if (_log_me)
         cout << "Sink " << get_id() << " sending ack " << _cumulative_ack << endl;
     ack->set_pathid(pkt.path_id());
+    ack->set_routing_entropy(pkt.routing_entropy());
+    ack->set_lbtag(pkt.lbtag());
+    // ECN drives the common congestion controller. CONGA feedback carries
+    // only its independent Q=3 DRE metric.
+    ack->set_conga_metric(pkt.conga_metric());
     ack->copy_sglb_tx_metadata(pkt);
     if (pkt.has_mrc_ev())
         ack->set_mrc_ev(pkt.mrc_ev());
     ack->set_duplicate_ack(duplicate_ack);
     ack->set_old_duplicate_ack(old_duplicate_ack);
-    if (RoceSrc::_transport_semantics ==
-            RoceSrc::TRANSPORT_MRC_EXACT_BOUNDED && !duplicate_ack) {
+    if (_src->_flow_lb_mode == RoceSrc::LB_MPRDMA ||
+        (RoceSrc::_transport_semantics ==
+            RoceSrc::TRANSPORT_MRC_EXACT_BOUNDED && !duplicate_ack)) {
         ack->set_delivered_psn(pkt.seqno());
     }
+    ack->set_retransmitted_data(pkt.retransmitted());
     ack->set_ts(ts);
     ack->set_stor_peer(_src->_dstaddr);
     ack->set_netaware_peer(_src->_dstaddr);

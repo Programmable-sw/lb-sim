@@ -28,7 +28,7 @@ OBSOLETE_ASSETS = (
     "run_nmrc_stageA_vs_tuned_auto.py",
     "run_nmrc_feedback_sweep.py",
     "run_feedback_cadence_evaluation.py",
-    "run_nmrc_dcqcn_variant_narrow_compare.py",
+    "run_nmrc_dctcp_variant_narrow_compare.py",
     "run_phase2_nmrc_sglbq_followup.py",
     "run_phase3_medium_eval.py",
     "run_branch123_ai_tuning.py",

@@ -62,6 +62,7 @@ EventList eventlist;
 
 static bool is_canonical_two_tier_scale(uint32_t nodes) {
     switch (nodes) {
+    case 16:  // four hosts per leaf, four leaves, four spines (smoke topology)
     case 256:
     case 512:
     case 1024:
@@ -791,17 +792,17 @@ const char* nmrc_network_decision_name(
 }
 
 void exit_error(char* progr) {
-    cout << "Usage " << progr << " [-nodes N] [-conns C] [-q queue_size] [-tm traffic_matrix_file]\\n\\t[-lb ecmp|ecmp_rr|adaptive-routing|sglb|sglb-ecn-filter|sglb-ecn-clear|sglb-old|sglb-paper|drill|reps|avail|grade|mrc|netaware|n-mrc|n-mrc-fixed0.5|n-mrc-delta|rr|ops|conweave|ndp]\\n\\t[-cc none|dcqcn|dcqcn_variant|mprdma]" << endl;
+    cout << "Usage " << progr << " [-nodes N] [-conns C] [-q queue_size] [-tm traffic_matrix_file]\\n\\t[-lb ecmp|ecmp_rr|adaptive-routing|conga|sglb|sglb-ecn-filter|sglb-ecn-clear|sglb-old|sglb-paper|drill|reps|avail|grade|mrc|netaware|n-mrc|n-mrc-fixed0.5|n-mrc-delta|rr|ops|conweave|ndp|mprdma]\\n\\t[-cc none|dcqcn|dctcp_variant]" << endl;
     cout << "\t[-roce_sack_bitmap_bits 64|128]" << endl;
     cout << "\t[-roce_transport_semantics legacy|mrc_exact_bounded]" << endl;
     cout << "\t[-roce_trim_recovery cumulative|exact]" << endl;
-    cout << "\t[-cc dcqcn_variant_nodup_old]" << endl;
+    cout << "\t[-cc dctcp_variant_nodup_old] [-pfc on|off]" << endl;
     cout << "\t[-dcqcn_nack_reaction cnp|ignore|rate_cut]" << endl;
     cout << "\t[-sglb_local_damping]" << endl;
     cout << "\t[-sglb_score_mode legacy|nmrc_quantized_topk]" << endl;
     cout << "\t[-sglb_nmrc_q_range qmin qmax]" << endl;
     cout << "\t[-sglb_nmrc_level_thresholds degraded bad avoid]" << endl;
-    cout << "\t[-sglb_nmrc_levels 4|8]" << endl;
+    cout << "\t[-sglb_nmrc_levels 4|8|16]" << endl;
     cout << "\t[-sglb_background] [-sglb_bg_links_per_direction N] "
          << "[-sglb_bg_rate_gbps x] [-sglb_bg_on_us x] "
          << "[-sglb_bg_off_us x] [-sglb_bg_packet_size bytes]" << endl;
@@ -859,7 +860,7 @@ int main(int argc, char **argv) {
     int packet_size = REPS_MTU_BYTES;
     uint32_t path_entropy_size = 10000000;
     uint32_t no_of_conns = 0, no_of_nodes = DEFAULT_NODES;
-    uint32_t tiers = 3; // we support 2 and 3 tier fattrees     
+    uint32_t tiers = 2; // current experiments use a two-tier leaf-spine fabric
     double logtime = 0.25; // ms;
     stringstream filename(ios_base::out);
     simtime_picosec hop_latency = timeFromUs(REPS_HOP_LATENCY_US);
@@ -869,7 +870,7 @@ int main(int argc, char **argv) {
     float ar_sticky_delta = 10;
     uint32_t ar_granularity = FatTreeSwitch::PER_PACKET;
     RoceSrc::lb_mode_t roce_lb_mode = RoceSrc::LB_ECMP;
-    RoceSrc::cc_mode_t roce_cc_mode = RoceSrc::CC_DCQCN_VARIANT;
+    RoceSrc::cc_mode_t roce_cc_mode = RoceSrc::CC_DCTCP_VARIANT;
     bool queue_user_set = false;
     bool queue_type_user_set = false;
     bool roce_rx_mode_user_set = false;
@@ -884,6 +885,12 @@ int main(int argc, char **argv) {
 
     uint64_t high_pfc = 80, low_pfc = 20;
     bool pfc_user_set = false;
+    bool pfc_enabled = true;
+    uint64_t lossless_ecn_kmin_bytes = 0, lossless_ecn_kmax_bytes = 0;
+    uint64_t shared_buffer_mb = 9;
+    double shared_ingress_alpha = 0.0625;
+    double shared_egress_alpha = 1.0;
+    uint64_t shared_headroom_bytes = 0;
     uint32_t reps_buffer = 8;
     double conweave_rtt_us = 16.0;
     double conweave_min_reroute_us = 4.0;
@@ -1073,12 +1080,30 @@ int main(int argc, char **argv) {
             else if (!strcmp(argv[i+1], "lossless_input_ecn")) {
                 qt = LOSSLESS_INPUT_ECN;
             }
+            else if (!strcmp(argv[i+1], "shared_buffer_ecn")) {
+                qt = SHARED_BUFFER_ECN;
+            }
             else {
                 cout << "Unknown queue type " << argv[i+1] << endl;
                 exit_error(argv[0]);
             }
             cout << "queue_type "<< qt << endl;
             queue_type_user_set = true;
+            i++;
+        } else if (!strcmp(argv[i],"-shared_buffer_mb")) {
+            shared_buffer_mb = strtoull(argv[i+1], NULL, 10);
+            i++;
+        } else if (!strcmp(argv[i],"-shared_ingress_alpha")) {
+            shared_ingress_alpha = atof(argv[i+1]);
+            i++;
+        } else if (!strcmp(argv[i],"-shared_egress_alpha")) {
+            shared_egress_alpha = atof(argv[i+1]);
+            i++;
+        } else if (!strcmp(argv[i],"-shared_headroom_kb")) {
+            shared_headroom_bytes = strtoull(argv[i+1], NULL, 10) * 1024;
+            i++;
+        } else if (!strcmp(argv[i],"-shared_headroom_bytes")) {
+            shared_headroom_bytes = strtoull(argv[i+1], NULL, 10);
             i++;
         } else if (!strcmp(argv[i],"-host_queue_type")) {
             if (!strcmp(argv[i+1], "swift")) {
@@ -1248,6 +1273,16 @@ int main(int argc, char **argv) {
                 FatTreeSwitch::set_strategy(FatTreeSwitch::ECMP);
                 roce_lb_mode = RoceSrc::LB_NDP;
                 lb_scheme_name = "ndp";
+            } else if (!strcmp(argv[i+1], "mprdma")) {
+                route_strategy = ECMP_FIB;
+                FatTreeSwitch::set_strategy(FatTreeSwitch::ECMP);
+                roce_lb_mode = RoceSrc::LB_MPRDMA;
+                lb_scheme_name = "mprdma";
+            } else if (!strcmp(argv[i+1], "conga")) {
+                route_strategy = ECMP_FIB;
+                FatTreeSwitch::set_strategy(FatTreeSwitch::ECMP);
+                roce_lb_mode = RoceSrc::LB_CONGA;
+                lb_scheme_name = "conga";
             } else if (!strcmp(argv[i+1], "adaptive-routing")) {
                 route_strategy = ECMP_FIB;
                 FatTreeSwitch::set_strategy(FatTreeSwitch::ADAPTIVE_ROUTING);
@@ -1269,19 +1304,24 @@ int main(int argc, char **argv) {
                 roce_cc_mode = RoceSrc::CC_NONE;
             } else if (!strcmp(argv[i+1], "dcqcn")) {
                 roce_cc_mode = RoceSrc::CC_DCQCN;
-            } else if (!strcmp(argv[i+1], "dcqcn_variant_nodup_old") ||
-                       !strcmp(argv[i+1], "dcqcn-variant-nodup-old")) {
-                roce_cc_mode = RoceSrc::CC_DCQCN_VARIANT_NODUP_OLD;
-            } else if (!strcmp(argv[i+1], "dcqcn_variant") ||
+            } else if (!strcmp(argv[i+1], "dctcp_variant_nodup_old") ||
+                       !strcmp(argv[i+1], "dcqcn_variant_nodup_old") ||
+                       !strcmp(argv[i+1], "dcqcn-variant-nodup-old") ||
+                       !strcmp(argv[i+1], "dctcp-variant-nodup-old")) {
+                roce_cc_mode = RoceSrc::CC_DCTCP_VARIANT_NODUP_OLD;
+            } else if (!strcmp(argv[i+1], "dctcp_variant") ||
+                       !strcmp(argv[i+1], "dcqcn_variant") ||
                        !strcmp(argv[i+1], "dcqcn-variant") ||
-                       !strcmp(argv[i+1], "mprdma") ||
+                       !strcmp(argv[i+1], "dctcp-variant") ||
                        !strcmp(argv[i+1], "dctcp")) {
-                roce_cc_mode = RoceSrc::CC_DCQCN_VARIANT;
+                roce_cc_mode = RoceSrc::CC_DCTCP_VARIANT;
             } else {
                 cout << "Unknown cc mode " << argv[i+1] << endl;
                 exit_error(argv[0]);
             }
-            cout << "cc mode " << argv[i+1] << endl;
+            cout << "cc mode " << (roce_cc_mode == RoceSrc::CC_DCTCP_VARIANT ?
+                "dctcp_variant" : roce_cc_mode == RoceSrc::CC_DCTCP_VARIANT_NODUP_OLD ?
+                "dctcp_variant_nodup_old" : argv[i+1]) << endl;
             roce_cc_mode_user_set = true;
             i++;
         } else if (!strcmp(argv[i],"-roce_trim_recovery")){
@@ -1787,9 +1827,9 @@ int main(int argc, char **argv) {
             i += 3;
         } else if (!strcmp(argv[i],"-sglb_nmrc_levels")) {
             uint32_t levels = atoi(argv[i+1]);
-            if (levels != 4 && levels != 8) {
+            if (levels != 4 && levels != 8 && levels != 16) {
                 cerr << "invalid SGLB n-MRC levels " << levels
-                     << "; expected 4 or 8" << endl;
+                     << "; expected 4, 8, or 16" << endl;
                 exit(1);
             }
             FatTreeSwitch::_sglb_nmrc_levels = levels;
@@ -1839,6 +1879,17 @@ int main(int argc, char **argv) {
                 FatTreeSwitch::_sglb_quality_levels = 1;
             FatTreeSwitch::_sglb_max_quality = FatTreeSwitch::_sglb_quality_levels - 1;
             cout << "sglb quality levels " << FatTreeSwitch::_sglb_quality_levels << endl;
+            i++;
+        } else if (!strcmp(argv[i],"-sglb_topk")){
+            char* end = NULL;
+            long k = strtol(argv[i+1], &end, 10);
+            if (end == argv[i+1] || *end || k < 1 || k > 65535) {
+                cerr << "sglb_topk must be an integer in [1,65535]" << endl;
+                exit(1);
+            }
+            FatTreeSwitch::_sglb_topk = static_cast<uint32_t>(k);
+            FatTreeSwitch::_sglb_candidate_policy = FatTreeSwitch::SGLB_CANDIDATE_SCORE_TOPK;
+            cout << "sglb continuous score topk " << k << endl;
             i++;
         } else if (!strcmp(argv[i],"-sglb_min_choices")){
             FatTreeSwitch::_sglb_min_choices = atoi(argv[i+1]);
@@ -2548,7 +2599,30 @@ int main(int argc, char **argv) {
                  << " avoid " << avoid << endl;
             i += 4;
         }
-         else if (!strcmp(argv[i],"-pfc_thresholds")){
+         else if (!strcmp(argv[i],"-lossless_ecn_kb")){
+            lossless_ecn_kmin_bytes = strtoull(argv[i+1], NULL, 10) * 1024;
+            lossless_ecn_kmax_bytes = strtoull(argv[i+2], NULL, 10) * 1024;
+            cout << "Lossless ECN thresholds " << lossless_ecn_kmin_bytes
+                 << " bytes " << lossless_ecn_kmax_bytes << " bytes" << endl;
+            i += 2;
+         } else if (!strcmp(argv[i],"-lossless_ecn_bytes")){
+            lossless_ecn_kmin_bytes = strtoull(argv[i+1], NULL, 10);
+            lossless_ecn_kmax_bytes = strtoull(argv[i+2], NULL, 10);
+            cout << "Lossless ECN thresholds " << lossless_ecn_kmin_bytes
+                 << " bytes " << lossless_ecn_kmax_bytes << " bytes" << endl;
+            i += 2;
+         } else if (!strcmp(argv[i],"-pfc")){
+            if (!strcmp(argv[i+1], "off"))
+                pfc_enabled = false;
+            else if (!strcmp(argv[i+1], "on"))
+                pfc_enabled = true;
+            else {
+                cout << "Unknown PFC mode " << argv[i+1] << endl;
+                exit_error(argv[0]);
+            }
+            cout << "PFC " << (pfc_enabled ? "enabled" : "disabled") << endl;
+            i++;
+         } else if (!strcmp(argv[i],"-pfc_thresholds")){
             low_pfc = atoi(argv[i+1]);
             high_pfc = atoi(argv[i+2]);
             pfc_user_set = true;
@@ -2823,8 +2897,8 @@ int main(int argc, char **argv) {
             cout << "MRC default receive mode sp (SACK/selective retransmission)" << endl;
         }
         if (!roce_cc_mode_user_set) {
-            roce_cc_mode = RoceSrc::CC_DCQCN_VARIANT;
-            cout << "MRC default cc dcqcn_variant" << endl;
+            roce_cc_mode = RoceSrc::CC_DCTCP_VARIANT;
+            cout << "MRC default cc dctcp_variant" << endl;
         }
         if (!ecn_thresh_user_set) {
             ecn_thresh = 0.8;
@@ -2842,8 +2916,8 @@ int main(int argc, char **argv) {
             cout << lb_scheme_name << " default receive mode sp (SACK/selective retransmission)" << endl;
         }
         if (!roce_cc_mode_user_set) {
-            roce_cc_mode = RoceSrc::CC_DCQCN_VARIANT;
-            cout << lb_scheme_name << " default cc dcqcn_variant" << endl;
+            roce_cc_mode = RoceSrc::CC_DCTCP_VARIANT;
+            cout << lb_scheme_name << " default cc dctcp_variant" << endl;
         }
         if (!ecn_thresh_user_set) {
             ecn_thresh = 0.8;
@@ -2861,8 +2935,8 @@ int main(int argc, char **argv) {
             cout << "NetAware default receive mode sp (SACK/selective retransmission)" << endl;
         }
         if (!roce_cc_mode_user_set) {
-            roce_cc_mode = RoceSrc::CC_DCQCN_VARIANT;
-            cout << "NetAware default cc dcqcn_variant" << endl;
+            roce_cc_mode = RoceSrc::CC_DCTCP_VARIANT;
+            cout << "NetAware default cc dctcp_variant" << endl;
         }
         if (!ecn_thresh_user_set) {
             ecn_thresh = 0.8;
@@ -2880,8 +2954,8 @@ int main(int argc, char **argv) {
             cout << "n-MRC default receive mode sp (SACK/selective retransmission)" << endl;
         }
         if (!roce_cc_mode_user_set) {
-            roce_cc_mode = RoceSrc::CC_DCQCN_VARIANT;
-            cout << "n-MRC default cc dcqcn_variant" << endl;
+            roce_cc_mode = RoceSrc::CC_DCTCP_VARIANT;
+            cout << "n-MRC default cc dctcp_variant" << endl;
         }
         if (!ecn_thresh_user_set) {
             ecn_thresh = 0.8;
@@ -2916,7 +2990,10 @@ int main(int argc, char **argv) {
                         roce_lb_mode == RoceSrc::LB_MRC ||
                         roce_lb_mode == RoceSrc::LB_RR ||
                         roce_lb_mode == RoceSrc::LB_CONWEAVE ||
-                        roce_lb_mode == RoceSrc::LB_NDP);
+                        roce_lb_mode == RoceSrc::LB_NDP ||
+                        roce_lb_mode == RoceSrc::LB_REPS ||
+                        roce_lb_mode == RoceSrc::LB_MPRDMA ||
+                        roce_lb_mode == RoceSrc::LB_CONGA);
     if (source_pathid_lb && !path_entropy_user_set && path_entropy_size > 10000) {
         path_entropy_size = 1;
         cout << "source-controlled LB will auto-calibrate path count from topology" << endl;
@@ -2930,8 +3007,8 @@ int main(int argc, char **argv) {
     if (!estimated_bdp_bytes) {
         estimated_bdp_bytes = (uint64_t)(((double)linkspeed * estimated_rtt_us * 1e-6) / 8.0);
     }
-    uint32_t estimated_bdp_pkts = (uint32_t)ceil((double)estimated_bdp_bytes /
-                                                Packet::data_packet_size());
+    uint32_t estimated_bdp_pkts = (uint32_t)ceil(
+        (double)estimated_bdp_bytes / Packet::data_packet_size());
     if (!estimated_bdp_pkts)
         estimated_bdp_pkts = 1;
     if (!queue_user_set) {
@@ -3005,6 +3082,19 @@ int main(int argc, char **argv) {
     FatTreeSwitch::_ar_sticky = ar_granularity;
     FatTreeSwitch::_sticky_delta = timeFromUs(ar_sticky_delta);
     FatTreeSwitch::_ecn_threshold_fraction = ecn_thresh;
+    FatTreeSwitch::_lossless_ecn_kmin_bytes = lossless_ecn_kmin_bytes;
+    FatTreeSwitch::_lossless_ecn_kmax_bytes = lossless_ecn_kmax_bytes;
+    FatTreeSwitch::_shared_buffer_bytes = shared_buffer_mb * 1024 * 1024;
+    FatTreeSwitch::_shared_ingress_alpha = shared_ingress_alpha;
+    FatTreeSwitch::_shared_egress_alpha = shared_egress_alpha;
+    if (!shared_headroom_bytes) {
+        shared_headroom_bytes = (uint64_t)(
+            2.0 * (double)linkspeed * timeAsSec(hop_latency) / 8.0) +
+            2ULL * (uint64_t)(packet_size + 48);
+        cout << "Shared-buffer per-port headroom " << shared_headroom_bytes
+             << " bytes (2*link-flight + 2*(payload+48))" << endl;
+    }
+    FatTreeSwitch::_shared_headroom_bytes = shared_headroom_bytes;
     FatTreeSwitch::_stor_feedback_min_interval = timeFromUs(stor_feedback_min_us);
     FatTreeSwitch::_stor_feedback_max_interval = timeFromUs(stor_feedback_max_us);
     FatTreeSwitch::_stor_trim_feedback_min_interval =
@@ -3068,12 +3158,15 @@ int main(int argc, char **argv) {
              << "us, quality levels " << FatTreeSwitch::_sglb_quality_levels
              << ", bucket " << FatTreeSwitch::_sglb_quality_bucket
              << ", min choices " << FatTreeSwitch::_sglb_min_choices
+             << ", continuous topk " << FatTreeSwitch::_sglb_topk
              << ", candidate policy "
              << (FatTreeSwitch::_sglb_candidate_policy ==
+                         FatTreeSwitch::SGLB_CANDIDATE_SCORE_TOPK ? "score_topk" :
+                (FatTreeSwitch::_sglb_candidate_policy ==
                          FatTreeSwitch::SGLB_CANDIDATE_STRICT_K ? "strict_k" :
                  FatTreeSwitch::_sglb_candidate_policy ==
                          FatTreeSwitch::SGLB_CANDIDATE_WHOLE_GRADE_MIN ?
-                         "whole_grade_min" : "exact_min")
+                         "whole_grade_min" : "exact_min"))
              << ", candidate dispatch "
              << (FatTreeSwitch::_sglb_candidate_dispatch ==
                          FatTreeSwitch::SGLB_DISPATCH_RANDOM ?
@@ -3132,19 +3225,19 @@ int main(int argc, char **argv) {
     RoceSrc::setMinRTO(roce_rto_us);
     RoceSrc::setHighRTO(roce_rto_high_us);
     RoceSrc::setRepsBufferSize(reps_buffer);
-    RoceSrc::setRepsWarmupPkts(roce_lb_mode == RoceSrc::LB_REPS ? estimated_bdp_pkts : 0);
-    if (roce_lb_mode == RoceSrc::LB_REPS) {
-        cout << "REPS warmup exploration " << estimated_bdp_pkts
-             << " packets (1BDP)" << endl;
-    }
+    // REPS Section 3.1: explore random entropies during the first BDP worth
+    // of packets of a new or idle connection.
+    RoceSrc::setRepsWarmupPkts(estimated_bdp_pkts);
+    cout << "REPS warmup exploration " << estimated_bdp_pkts
+         << " packets (1BDP)" << endl;
     RoceSrc::setConweaveRttThreshold(timeFromUs(conweave_rtt_us));
     RoceSrc::setConweaveMinRerouteGap(timeFromUs(conweave_min_reroute_us));
     RoceSrc::setNdpInitialWindow(ndp_cwnd);
-    cout << "FinalCcMrcConfig dcqcn_variant_inflate="
+    cout << "FinalCcMrcConfig dctcp_variant_inflate="
          << (roce_transport_semantics ==
                  RoceSrc::TRANSPORT_MRC_EXACT_BOUNDED ?
              "disabled" :
-             (roce_cc_mode == RoceSrc::CC_DCQCN_VARIANT_NODUP_OLD ?
+             (roce_cc_mode == RoceSrc::CC_DCTCP_VARIANT_NODUP_OLD ?
                  "natural_nodup_old" : "natural")) << " "
          << "mrc_ecn_trim_penalty=mode_uniform "
          << "roce_trim_recovery=" << RoceSrc::trimRecoveryModeName()
@@ -3167,8 +3260,8 @@ int main(int argc, char **argv) {
         RoceSrc::printDcqcnConfiguration(cout);
     if (!cc_iw_pkts) {
         if (roce_cc_mode == RoceSrc::CC_DCQCN ||
-            roce_cc_mode == RoceSrc::CC_DCQCN_VARIANT ||
-            roce_cc_mode == RoceSrc::CC_DCQCN_VARIANT_NODUP_OLD) {
+            roce_cc_mode == RoceSrc::CC_DCTCP_VARIANT ||
+            roce_cc_mode == RoceSrc::CC_DCTCP_VARIANT_NODUP_OLD) {
             cc_iw_pkts = estimated_bdp_pkts;
             if (!cc_iw_pkts)
                 cc_iw_pkts = 1;
@@ -3187,8 +3280,15 @@ int main(int argc, char **argv) {
         roce_rto_scan_us = 1.0;
     RoceRtxTimerScanner roceRtxScanner(timeFromUs(roce_rto_scan_us), eventlist);
 
-    LosslessInputQueue::_high_threshold = Packet::data_packet_size()*high_pfc;
-    LosslessInputQueue::_low_threshold = Packet::data_packet_size()*low_pfc;
+    if (!pfc_enabled) {
+        // Keep lossless buffering and ECN, but suppress pause generation.
+        LosslessInputQueue::_high_threshold = UINT64_MAX;
+        LosslessInputQueue::_low_threshold = UINT64_MAX - 1;
+    } else {
+        LosslessInputQueue::_high_threshold = Packet::data_packet_size()*high_pfc;
+        LosslessInputQueue::_low_threshold = Packet::data_packet_size()*low_pfc;
+    }
+    LosslessInputQueue::_pfc_enabled = pfc_enabled;
 
     eventlist.setEndtime(timeFromUs((uint32_t)end_time));
     queuesize = memFromPkt(queuesize);
@@ -3260,11 +3360,12 @@ int main(int argc, char **argv) {
         if (tiers == 2) {
             if (!is_canonical_two_tier_scale(no_of_nodes)) {
                 cerr << "Generated 2-tier leaf-spine supports node counts: "
-                     << "256, 512, 1024, 2048, 4096, 8192; got "
+                     << "16, 256, 512, 1024, 2048, 4096, 8192; got "
                      << no_of_nodes << endl;
                 exit(1);
             }
-            FatTreeTopology::set_two_tier_leaf_spine_radix(64);
+            FatTreeTopology::set_two_tier_leaf_spine_radix(
+                no_of_nodes == 16 ? 4 : 64);
         }
         FatTreeTopology::set_slow_link_divisor(slow_core_downlink_divisor);
         FatTreeTopology::set_slow_tor_uplinks(slow_tor_uplinks);
@@ -3390,9 +3491,11 @@ int main(int argc, char **argv) {
     RoceSrc::setDiagPhysicalPathSpace(topology_path_combo);
     RoceSrc::resetPathSelectionDiag();
     RoceSrc::resetStorProfileDiag();
+    RoceSrc::resetCongaSharedState();
     FatTreeSwitch::reset_sglb_route_diag();
     FatTreeSwitch::reset_nmrc_hybrid_diag();
     RoceSrc::setHostsPerTor(top->radix_down(TOR_TIER));
+    RoceSrc::setCongaUplinks(top->radix_up(TOR_TIER));
 
     uint32_t path_space = path_entropy_size ? path_entropy_size : 1;
     if ((roce_lb_mode == RoceSrc::LB_MRC ||
@@ -3403,7 +3506,8 @@ int main(int argc, char **argv) {
         exit(1);
     }
     FatTreeSwitch::_netaware_path_count = path_space;
-    FatTreeSwitch::_netaware_enabled = roce_lb_mode == RoceSrc::LB_NETAWARE;
+    FatTreeSwitch::_netaware_enabled =
+        roce_lb_mode == RoceSrc::LB_NETAWARE;
     FatTreeSwitch::_stor_path_count = path_space;
     FatTreeSwitch::_stor_enabled = roce_lb_mode == RoceSrc::LB_STOR;
     uint32_t auto_stor_feedback_pkts = lb_scheme_name == "avail" ?
@@ -4396,6 +4500,19 @@ int main(int argc, char **argv) {
          << " composite_trims=" << queue_diag.composite_trims
          << " composite_drops=" << queue_diag.composite_drops
          << " composite_ecn_marks=" << queue_diag.composite_ecn_marks
+         << endl;
+    cout << "SharedBufferDiag total_bytes=" << FatTreeSwitch::_shared_buffer_bytes
+         << " peak_bytes=" << FatTreeSwitch::_shared_buffer_peak_bytes
+         << " headroom_bytes=" << FatTreeSwitch::_shared_headroom_bytes
+         << " overflows=" << FatTreeSwitch::_shared_buffer_overflows_total
+         << " ingress_alpha=" << FatTreeSwitch::_shared_ingress_alpha
+         << " egress_alpha=" << FatTreeSwitch::_shared_egress_alpha
+         << " pfc_pause=" << LosslessInputQueue::_pause_events
+         << " pfc_resume=" << LosslessInputQueue::_resume_events
+         << " ingress_peak_bytes=" << LosslessInputQueue::_peak_queue_bytes
+         << " min_pause_threshold_bytes="
+         << (LosslessInputQueue::_minimum_dynamic_threshold == UINT64_MAX ? 0 :
+             LosslessInputQueue::_minimum_dynamic_threshold)
          << endl;
     StorDiag stor_diag = collect_stor_diag(top);
     cout << "StorDiag "

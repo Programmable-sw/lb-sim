@@ -124,7 +124,7 @@ def main():
                 assert option_value(command, "-host_queue_type") == "prio"
                 assert option_value(command, "-roce_rx_mode") == "sp"
                 assert option_value(command, "-roce_sack_bitmap_bits") == "64"
-                assert option_value(command, "-cc") == "dcqcn_variant"
+                assert option_value(command, "-cc") == "dctcp_variant"
                 assert option_value(
                     command, "-roce_transport_semantics") == "legacy"
                 assert option_value(
@@ -141,10 +141,10 @@ def main():
         stdout_file.write_text(
             "lb mode mrc\n"
             "queue_type 11\n"
-            "cc mode dcqcn_variant\n"
+            "cc mode dctcp_variant\n"
             "RoCE receive mode sp\n"
             "RoCE SACK bitmap 64 bits\n"
-            "FinalCcMrcConfig dcqcn_variant_inflate=natural "
+            "FinalCcMrcConfig dctcp_variant_inflate=natural "
             "mrc_ecn_trim_penalty=mode_uniform\n"
             "MrcPolicyDiag policy=skip_once "
             "all_skip_resolution=ordinary_rotation\n"

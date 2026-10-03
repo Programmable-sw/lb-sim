@@ -91,7 +91,7 @@ def main():
             "-lb", "sglb",
             "-queue_type", "composite_ecn_lb",
             "-host_queue_type", "prio",
-            "-cc", "dcqcn_variant",
+            "-cc", "dctcp_variant",
             "-roce_rx_mode", "sp",
             "-roce_sack_bitmap_bits", "64",
             "-linkspeed", "1000",

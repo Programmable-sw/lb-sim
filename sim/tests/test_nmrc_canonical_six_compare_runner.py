@@ -79,7 +79,7 @@ def main():
         hashes_by_block = {}
         for spec in specs:
             assert spec["variant"] == "mrc_exact_bounded"
-            assert spec["cc_mode"] == "dcqcn_variant"
+            assert spec["cc_mode"] == "dctcp_variant"
             assert spec["inflate_diag"] == "disabled"
             assert spec["trim_mode"] == "exact"
             block = (spec["scenario"], spec["seed"])
@@ -94,7 +94,7 @@ def main():
                     ("-host_queue_type", "prio"),
                     ("-mtu", "4096"),
                     ("-paths", "64"),
-                    ("-cc", "dcqcn_variant"),
+                    ("-cc", "dctcp_variant"),
                     ("-roce_rx_mode", "sp"),
                     ("-roce_sack_bitmap_bits", "64"),
                     ("-roce_transport_semantics", "mrc_exact_bounded"),
@@ -169,7 +169,7 @@ def main():
             raise AssertionError("validate_specs accepted non-canonical seeds")
 
         common_runtime = (
-            "cc mode dcqcn_variant\n"
+            "cc mode dctcp_variant\n"
             "queue_type 11\n"
             "host queue_type 4\n"
             "RoCE receive mode sp\n"
@@ -178,7 +178,7 @@ def main():
             "RoceTransportConfig semantics=mrc_exact_bounded "
             "awnd=cwnd_minus_inflight exact_trim_attempt_id=on "
             "recovery_reserve_bytes=4096\n"
-            "FinalCcMrcConfig dcqcn_variant_inflate=disabled "
+            "FinalCcMrcConfig dctcp_variant_inflate=disabled "
             "roce_trim_recovery=exact\n"
             "BoundedRecoveryDiag semantics=mrc_exact_bounded "
             "inflight_final=0 unique_acks=2 "
@@ -260,7 +260,7 @@ def main():
             "scheme": "ar",
             "lb_name": "adaptive-routing",
             "variant": "mrc_exact_bounded",
-            "cc_mode": "dcqcn_variant",
+            "cc_mode": "dctcp_variant",
             "inflate_diag": "disabled",
             "trim_mode": "exact",
             "seed": 13,

@@ -509,7 +509,7 @@ static void test_fast_cnp_only_cools_ev_without_transport_or_cc_changes() {
 
     RoceSrc::setLoadBalancing(RoceSrc::LB_NMRC);
     RoceSrc::setPathEntropySize(8);
-    RoceSrc::setCongestionControl(RoceSrc::CC_DCQCN_VARIANT);
+    RoceSrc::setCongestionControl(RoceSrc::CC_DCTCP_VARIANT);
     RoceSrc* src = make_src(1501);
     src->_flow_started = true;
     src->init_nmrc_evs_for_test(8);

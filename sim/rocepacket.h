@@ -42,6 +42,12 @@ class RocePacket : public Packet {
                 p->_is_header = false;
                 p->_seqno = seqno;
                 p->_retransmitted = retransmitted;
+                p->_lbtag = UINT32_MAX;
+                p->_conga_metric = 0;
+                p->_conga_feedback_path = UINT32_MAX;
+                p->_conga_feedback_metric = 0;
+                p->_routing_entropy = UINT32_MAX;
+                p->_reps_entropy = false;
                 p->_last_packet = last_packet;
                 p->_path_len = 0;
                 p->_direction = NONE;
@@ -74,7 +80,13 @@ class RocePacket : public Packet {
                 p->_is_header = false;
                 p->_direction = NONE;        
                 p->_retransmitted = retransmitted;
+                p->_lbtag = UINT32_MAX;
+                p->_conga_metric = 0;
+                p->_conga_feedback_path = UINT32_MAX;
+                p->_conga_feedback_metric = 0;
                 p->_last_packet = last_packet;
+                p->_routing_entropy = UINT32_MAX;
+                p->_reps_entropy = false;
                 p->_path_len = route.size();
                 p->_srcaddr = UINT32_MAX;
                 p->_has_stor_feedback = false;
@@ -102,6 +114,29 @@ class RocePacket : public Packet {
     
         inline seq_t seqno() const {return _seqno;}
     inline bool retransmitted() const {return _retransmitted;}
+    inline void set_lbtag(uint32_t tag) {_lbtag = tag;}
+    inline uint32_t lbtag() const {return _lbtag;}
+    inline void set_conga_metric(uint8_t metric) {
+        if (metric > _conga_metric) _conga_metric = metric;
+    }
+    inline uint8_t conga_metric() const {return _conga_metric;}
+    inline void set_conga_feedback(uint32_t path, uint8_t metric) {
+        _conga_feedback_path = path;
+        _conga_feedback_metric = metric;
+    }
+    inline bool has_conga_feedback() const {
+        return _conga_feedback_path != UINT32_MAX;
+    }
+    inline uint32_t conga_feedback_path() const {
+        return _conga_feedback_path;
+    }
+    inline uint8_t conga_feedback_metric() const {
+        return _conga_feedback_metric;
+    }
+    inline void set_routing_entropy(uint32_t value) {_routing_entropy = value;}
+    inline uint32_t routing_entropy() const {return _routing_entropy;}
+    inline void set_reps_entropy(bool value) {_reps_entropy = value;}
+    inline bool reps_entropy() const {return _reps_entropy;}
     inline bool last_packet() const {return _last_packet;}
     inline simtime_picosec ts() const {return _ts;}
     inline void set_ts(simtime_picosec ts) {_ts = ts;}
@@ -156,6 +191,12 @@ class RocePacket : public Packet {
     seq_t _seqno;
     simtime_picosec _ts;
     bool _retransmitted;
+    uint32_t _lbtag;
+    uint8_t _conga_metric;
+    uint32_t _conga_feedback_path;
+    uint8_t _conga_feedback_metric;
+    uint32_t _routing_entropy;
+    bool _reps_entropy;
     bool _last_packet;  // set to true in the last packet in a flow.
     uint32_t _srcaddr;
     bool _has_stor_feedback;
@@ -197,7 +238,11 @@ class RoceAck : public Packet {
                 p->_duplicate_ack = false;
                 p->_old_duplicate_ack = false;
                 p->_has_delivered_psn = false;
+                p->_lbtag = UINT32_MAX;
+                p->_conga_metric = 0;
+                p->_routing_entropy = UINT32_MAX;
                 p->_delivered_psn = 0;
+                p->_retransmitted_data = false;
                 p->_has_sglb_tx_metadata = false;
                 p->_sglb_selected_path = UINT32_MAX;
                 p->_sglb_tx_candidate_epoch = 0;
@@ -245,7 +290,15 @@ class RoceAck : public Packet {
         _delivered_psn = psn;
         _has_delivered_psn = true;
     }
+    inline void set_retransmitted_data(bool value) {_retransmitted_data = value;}
+    inline bool retransmitted_data() const {return _retransmitted_data;}
     inline bool has_delivered_psn() const {return _has_delivered_psn;}
+    inline void set_lbtag(uint32_t tag) {_lbtag = tag;}
+    inline uint32_t lbtag() const {return _lbtag;}
+    inline void set_conga_metric(uint8_t metric) {_conga_metric = metric;}
+    inline uint8_t conga_metric() const {return _conga_metric;}
+    inline void set_routing_entropy(uint32_t value) {_routing_entropy = value;}
+    inline uint32_t routing_entropy() const {return _routing_entropy;}
     inline seq_t delivered_psn() const {return _delivered_psn;}
     inline void copy_sglb_tx_metadata(const RocePacket& packet) {
         if (!packet.has_sglb_tx_metadata())
@@ -283,7 +336,11 @@ class RoceAck : public Packet {
     uint32_t _mrc_ev;
     bool _duplicate_ack;
     bool _old_duplicate_ack;
+    bool _retransmitted_data;
     bool _has_delivered_psn;
+    uint32_t _lbtag;
+    uint8_t _conga_metric;
+    uint32_t _routing_entropy;
     seq_t _delivered_psn;
     bool _has_sglb_tx_metadata;
     uint32_t _sglb_selected_path;

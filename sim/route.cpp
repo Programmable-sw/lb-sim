@@ -7,9 +7,9 @@
 
 #define MAXQUEUES 10
 
-Route::Route() : _hop_count(0), _reverse(NULL) {};
+Route::Route() : _hop_count(0), _reverse(NULL), _source_leaf_uplink(UINT32_MAX) {};
 
-Route::Route(int size) : _hop_count(0), _reverse(NULL) {
+Route::Route(int size) : _hop_count(0), _reverse(NULL), _source_leaf_uplink(UINT32_MAX) {
     _sinklist.reserve(size);
 };
 
@@ -19,6 +19,7 @@ Route::Route(const Route& orig, PacketSink& dst) : _sinklist(orig.size()+1){
     _reverse = orig._reverse;
     _hop_count = orig.hop_count();
     _no_of_paths = orig.no_of_paths();
+    _source_leaf_uplink = orig.source_leaf_uplink();
     for (size_t i = 0; i < orig.size(); i++) {
         _sinklist[i] = orig.at(i);
     }
@@ -31,6 +32,7 @@ Route*
 Route::clone() const {
     Route *copy = new Route(_hop_count);
     copy->set_path_id(_path_id, _no_of_paths);
+    copy->set_source_leaf_uplink(_source_leaf_uplink);
     /* don't clone the reverse path
        if (_reverse) {
        copy->_reverse = _reverse->clone();

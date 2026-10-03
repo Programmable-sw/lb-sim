@@ -98,7 +98,7 @@ static void configure_bounded_transport() {
         packet_size_configured = true;
     }
     RoceSrc::setReceiveMode(RoceSrc::RX_SP_RETX_QUEUE);
-    RoceSrc::setCongestionControl(RoceSrc::CC_DCQCN_VARIANT);
+    RoceSrc::setCongestionControl(RoceSrc::CC_DCTCP_VARIANT);
     RoceSrc::setTransportSemantics(
         RoceSrc::TRANSPORT_MRC_EXACT_BOUNDED);
 }

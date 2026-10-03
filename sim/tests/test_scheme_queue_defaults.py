@@ -57,16 +57,16 @@ def main():
     main_roce = (ROOT / "sim" / "datacenter" / "main_roce.cpp").read_text(
         encoding="utf-8")
 
-    if "RoceSrc::cc_mode_t roce_cc_mode = RoceSrc::CC_DCQCN_VARIANT;" not in main_roce:
-        raise AssertionError("global RoCE CC default should be dcqcn_variant")
+    if "RoceSrc::cc_mode_t roce_cc_mode = RoceSrc::CC_DCTCP_VARIANT;" not in main_roce:
+        raise AssertionError("global RoCE CC default should be dctcp_variant")
     for marker in (
-            'lb_scheme_name << " default cc dcqcn_variant"',
-            'MRC default cc dcqcn_variant',
-            'n-MRC default cc dcqcn_variant'):
+            'lb_scheme_name << " default cc dctcp_variant"',
+            'MRC default cc dctcp_variant',
+            'n-MRC default cc dctcp_variant'):
         if marker not in main_roce:
             raise AssertionError(f"missing {marker!r}")
     if "MRC default cc none" in main_roce:
-        raise AssertionError("MRC must not override the shared dcqcn_variant default")
+        raise AssertionError("MRC must not override the shared dctcp_variant default")
 
     for label in ("mrc", "avail", "grade", "netaware"):
         actual = command_queue_type(module, label)

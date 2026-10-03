@@ -252,7 +252,7 @@ def build_command(spec, sim, traffic_file, case_dir, nodes,
         "-end", str(scenario_end_us(spec.scenario)),
         "-paths", str(topology.paths),
         "-seed", str(spec.seed),
-        "-cc", "dcqcn_variant",
+        "-cc", "dctcp_variant",
         "-roce_rx_mode", "sp",
         "-roce_sack_bitmap_bits", "64",
         "-roce_transport_semantics", "mrc_exact_bounded",
@@ -336,7 +336,7 @@ def parse_diagnostics(text):
 def config_ok(text, spec, returncode, nodes):
     required = (
         f"lb mode {LB_NAMES[spec.scheme]}",
-        "cc mode dcqcn_variant",
+        "cc mode dctcp_variant",
         "RoCE receive mode sp",
         "RoCE SACK bitmap 64 bits",
         "RoCE TRIM recovery mode exact",

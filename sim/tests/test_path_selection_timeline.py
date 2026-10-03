@@ -45,7 +45,7 @@ def main():
             "-end", "1000",
             "-paths", "64",
             "-seed", "13",
-            "-cc", "dcqcn_variant",
+            "-cc", "dctcp_variant",
             "-roce_rx_mode", "sp",
             "-roce_sack_bitmap_bits", "64",
             "-queue_cv_sample_us", "100",

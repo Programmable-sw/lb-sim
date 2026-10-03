@@ -31,7 +31,7 @@ def run(nodes, include_nodes=True):
             "-tm", str(traffic), "-conns", "0", "-tiers", "2",
             "-lb", "rr", "-paths", "64",
             "-queue_type", "composite_ecn_lb",
-            "-host_queue_type", "prio", "-cc", "dcqcn_variant",
+            "-host_queue_type", "prio", "-cc", "dctcp_variant",
             "-end", "1", "-linkspeed", "400000",
         ]
         if include_nodes:

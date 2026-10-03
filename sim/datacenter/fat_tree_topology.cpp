@@ -819,7 +819,19 @@ FatTreeTopology::alloc_queue(QueueLogger* queueLogger, linkspeed_bps speed, mem_
         return new LosslessOutputQueue(speed, queuesize, *_eventlist, queueLogger);
     case LOSSLESS_INPUT_ECN:
         return new LosslessOutputQueue(speed, queuesize, *_eventlist, queueLogger,
-                                       1, queuesize / 5, queuesize * 4 / 5);
+                                       1,
+                                       FatTreeSwitch::_lossless_ecn_kmin_bytes ?
+                                       FatTreeSwitch::_lossless_ecn_kmin_bytes : queuesize / 5,
+                                       FatTreeSwitch::_lossless_ecn_kmax_bytes ?
+                                       FatTreeSwitch::_lossless_ecn_kmax_bytes : queuesize * 4 / 5);
+    case SHARED_BUFFER_ECN:
+        return new LosslessOutputQueue(speed,
+                                       FatTreeSwitch::_shared_buffer_bytes +
+                                           FatTreeSwitch::_shared_headroom_bytes,
+                                       *_eventlist, queueLogger, 1,
+                                       FatTreeSwitch::_lossless_ecn_kmin_bytes,
+                                       FatTreeSwitch::_lossless_ecn_kmax_bytes,
+                                       true);
     case COMPOSITE_ECN:
         if (tor && dir == DOWNLINK) 
             return new CompositeQueue(speed, queuesize, *_eventlist, queueLogger);
@@ -930,9 +942,9 @@ void FatTreeTopology::init_network(){
 
                 assert(switches_lp[tor]->addPort(queues_nlp_ns[tor][srv][b]) < 128);
 
-                if (_qt==LOSSLESS_INPUT || _qt == LOSSLESS_INPUT_ECN){
+                if (_qt==LOSSLESS_INPUT || _qt == LOSSLESS_INPUT_ECN || _qt == SHARED_BUFFER_ECN){
                     //no virtual queue needed at server
-                    new LosslessInputQueue(*_eventlist, queues_ns_nlp[srv][tor][b], switches_lp[tor], _hop_latency);
+                    new LosslessInputQueue(*_eventlist, queues_ns_nlp[srv][tor][b], switches_lp[tor], _hop_latency, _qt == SHARED_BUFFER_ECN);
                 }
         
                 pipes_ns_nlp[srv][tor][b] = new Pipe(hop_latency, *_eventlist);
@@ -1029,9 +1041,9 @@ void FatTreeTopology::init_network(){
                   ((LosslessQueue*)queues_nlp_nup[tor][agg])->setRemoteEndpoint(queues_nup_nlp[agg][tor]);
                   ((LosslessQueue*)queues_nup_nlp[agg][tor])->setRemoteEndpoint(queues_nlp_nup[tor][agg]);
                   }else */
-                if (_qt==LOSSLESS_INPUT || _qt == LOSSLESS_INPUT_ECN){            
-                    new LosslessInputQueue(*_eventlist, queues_nlp_nup[tor][agg][b],switches_up[agg],_hop_latency);
-                    new LosslessInputQueue(*_eventlist, queues_nup_nlp[agg][tor][b],switches_lp[tor],_hop_latency);
+                if (_qt==LOSSLESS_INPUT || _qt == LOSSLESS_INPUT_ECN || _qt == SHARED_BUFFER_ECN){
+                    new LosslessInputQueue(*_eventlist, queues_nlp_nup[tor][agg][b],switches_up[agg],_hop_latency, _qt == SHARED_BUFFER_ECN);
+                    new LosslessInputQueue(*_eventlist, queues_nup_nlp[agg][tor][b],switches_lp[tor],_hop_latency, _qt == SHARED_BUFFER_ECN);
                 }
         
                 pipes_nlp_nup[tor][agg][b] = new Pipe(hop_latency, *_eventlist);
@@ -1107,9 +1119,9 @@ void FatTreeTopology::init_network(){
                       ((LosslessQueue*)queues_nc_nup[core][agg])->setRemoteEndpoint(queues_nup_nc[agg][core]);
                       }
                       else*/
-                    if (_qt == LOSSLESS_INPUT || _qt == LOSSLESS_INPUT_ECN){
-                        new LosslessInputQueue(*_eventlist, queues_nup_nc[agg][core][b], switches_c[core], _hop_latency);
-                        new LosslessInputQueue(*_eventlist, queues_nc_nup[core][agg][b], switches_up[agg], _hop_latency);
+                    if (_qt == LOSSLESS_INPUT || _qt == LOSSLESS_INPUT_ECN || _qt == SHARED_BUFFER_ECN){
+                        new LosslessInputQueue(*_eventlist, queues_nup_nc[agg][core][b], switches_c[core], _hop_latency, _qt == SHARED_BUFFER_ECN);
+                        new LosslessInputQueue(*_eventlist, queues_nc_nup[core][agg][b], switches_up[agg], _hop_latency, _qt == SHARED_BUFFER_ECN);
                     }
                     //if (logfile) logfile->writeName(*(queues_nc_nup[core][agg]));
             
@@ -1196,6 +1208,19 @@ void FatTreeTopology::add_failed_link(uint32_t type, uint32_t switch_id, uint32_
 vector<const Route*>* FatTreeTopology::get_bidir_paths(uint32_t src, uint32_t dest, bool reverse){
     vector<const Route*>* paths = new vector<const Route*>();
 
+    // Assign one stable physical path index after enumeration.  The reverse
+    // route shares the same path identity, while LBTag remains its own field.
+    auto finalize_path_ids = [&paths]() {
+        for (uint32_t i = 0; i < paths->size(); ++i) {
+            Route* forward = const_cast<Route*>((*paths)[i]);
+            forward->set_path_id(i, paths->size());
+            if (forward->reverse()) {
+                Route* reverse = const_cast<Route*>(forward->reverse());
+                reverse->set_path_id(i, paths->size());
+            }
+        }
+    };
+
     route_t *routeout, *routeback;
   
     //QueueLoggerSimple *simplequeuelogger = new QueueLoggerSimple();
@@ -1212,7 +1237,7 @@ vector<const Route*>* FatTreeTopology::get_bidir_paths(uint32_t src, uint32_t de
         routeout->push_back(queues_ns_nlp[src][HOST_POD_SWITCH(src)][0]);
         routeout->push_back(pipes_ns_nlp[src][HOST_POD_SWITCH(src)][0]);
 
-        if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN)
+        if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN || _qt==SHARED_BUFFER_ECN)
             routeout->push_back(queues_ns_nlp[src][HOST_POD_SWITCH(src)][0]->getRemoteEndpoint());
 
         routeout->push_back(queues_nlp_ns[HOST_POD_SWITCH(dest)][dest][0]);
@@ -1224,7 +1249,7 @@ vector<const Route*>* FatTreeTopology::get_bidir_paths(uint32_t src, uint32_t de
             routeback->push_back(queues_ns_nlp[dest][HOST_POD_SWITCH(dest)][0]);
             routeback->push_back(pipes_ns_nlp[dest][HOST_POD_SWITCH(dest)][0]);
 
-            if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN)
+            if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN || _qt==SHARED_BUFFER_ECN)
                 routeback->push_back(queues_ns_nlp[dest][HOST_POD_SWITCH(dest)][0]->getRemoteEndpoint());
 
             routeback->push_back(queues_nlp_ns[HOST_POD_SWITCH(src)][src][0]);
@@ -1239,6 +1264,7 @@ vector<const Route*>* FatTreeTopology::get_bidir_paths(uint32_t src, uint32_t de
 
         check_non_null(routeout);
         //cout << "pathcount " << paths->size() << endl;
+        finalize_path_ids();
         return paths;
     }
     else if (HOST_POD(src)==HOST_POD(dest)){
@@ -1264,19 +1290,19 @@ vector<const Route*>* FatTreeTopology::get_bidir_paths(uint32_t src, uint32_t de
                     routeout->push_back(queues_ns_nlp[src][HOST_POD_SWITCH(src)][0]);
                     routeout->push_back(pipes_ns_nlp[src][HOST_POD_SWITCH(src)][0]);
 
-                    if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN)
+                    if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN || _qt==SHARED_BUFFER_ECN)
                         routeout->push_back(queues_ns_nlp[src][HOST_POD_SWITCH(src)][0]->getRemoteEndpoint());
 
                     routeout->push_back(queues_nlp_nup[HOST_POD_SWITCH(src)][upper][b_up]);
                     routeout->push_back(pipes_nlp_nup[HOST_POD_SWITCH(src)][upper][b_up]);
 
-                    if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN)
+                    if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN || _qt==SHARED_BUFFER_ECN)
                         routeout->push_back(queues_nlp_nup[HOST_POD_SWITCH(src)][upper][b_up]->getRemoteEndpoint());
 
                     routeout->push_back(queues_nup_nlp[upper][HOST_POD_SWITCH(dest)][b_down]);
                     routeout->push_back(pipes_nup_nlp[upper][HOST_POD_SWITCH(dest)][b_down]);
 
-                    if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN)
+                    if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN || _qt==SHARED_BUFFER_ECN)
                         routeout->push_back(queues_nup_nlp[upper][HOST_POD_SWITCH(dest)][b_down]->getRemoteEndpoint());
 
                     routeout->push_back(queues_nlp_ns[HOST_POD_SWITCH(dest)][dest][0]);
@@ -1289,19 +1315,19 @@ vector<const Route*>* FatTreeTopology::get_bidir_paths(uint32_t src, uint32_t de
                         routeback->push_back(queues_ns_nlp[dest][HOST_POD_SWITCH(dest)][0]);
                         routeback->push_back(pipes_ns_nlp[dest][HOST_POD_SWITCH(dest)][0]);
 
-                        if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN)
+                        if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN || _qt==SHARED_BUFFER_ECN)
                             routeback->push_back(queues_ns_nlp[dest][HOST_POD_SWITCH(dest)][0]->getRemoteEndpoint());
 
                         routeback->push_back(queues_nlp_nup[HOST_POD_SWITCH(dest)][upper][b_down]);
                         routeback->push_back(pipes_nlp_nup[HOST_POD_SWITCH(dest)][upper][b_down]);
 
-                        if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN)
+                        if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN || _qt==SHARED_BUFFER_ECN)
                             routeback->push_back(queues_nlp_nup[HOST_POD_SWITCH(dest)][upper][b_down]->getRemoteEndpoint());
 
                         routeback->push_back(queues_nup_nlp[upper][HOST_POD_SWITCH(src)][b_up]);
                         routeback->push_back(pipes_nup_nlp[upper][HOST_POD_SWITCH(src)][b_up]);
 
-                        if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN)
+                        if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN || _qt==SHARED_BUFFER_ECN)
                             routeback->push_back(queues_nup_nlp[upper][HOST_POD_SWITCH(src)][b_up]->getRemoteEndpoint());
       
                         routeback->push_back(queues_nlp_ns[HOST_POD_SWITCH(src)][src][0]);
@@ -1311,6 +1337,9 @@ vector<const Route*>* FatTreeTopology::get_bidir_paths(uint32_t src, uint32_t de
                         routeback->set_reverse(routeout);
                     }
       
+                    // The source-leaf uplink is the first ToR-to-aggregate
+                    // choice (b_up), which is CONGA's LBTag.
+                    routeout->set_source_leaf_uplink(b_up);
                     //print_route(*routeout);
                     paths->push_back(routeout);
                     check_non_null(routeout);
@@ -1318,6 +1347,7 @@ vector<const Route*>* FatTreeTopology::get_bidir_paths(uint32_t src, uint32_t de
             }
         }
         cout << "pathcount " << paths->size() << endl;
+        finalize_path_ids();
         return paths;
     } else {
         assert(_tiers == 3);
@@ -1359,19 +1389,19 @@ vector<const Route*>* FatTreeTopology::get_bidir_paths(uint32_t src, uint32_t de
                                 routeout->push_back(queues_ns_nlp[src][HOST_POD_SWITCH(src)][0]);
                                 routeout->push_back(pipes_ns_nlp[src][HOST_POD_SWITCH(src)][0]);
 
-                                if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN)
+                                if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN || _qt==SHARED_BUFFER_ECN)
                                     routeout->push_back(queues_ns_nlp[src][HOST_POD_SWITCH(src)][0]->getRemoteEndpoint());
         
                                 routeout->push_back(queues_nlp_nup[HOST_POD_SWITCH(src)][upper][b1_up]);
                                 routeout->push_back(pipes_nlp_nup[HOST_POD_SWITCH(src)][upper][b1_up]);
 
-                                if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN)
+                                if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN || _qt==SHARED_BUFFER_ECN)
                                     routeout->push_back(queues_nlp_nup[HOST_POD_SWITCH(src)][upper][b1_up]->getRemoteEndpoint());
         
                                 routeout->push_back(queues_nup_nc[upper][core][b2_up]);
                                 routeout->push_back(pipes_nup_nc[upper][core][b2_up]);
 
-                                if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN)
+                                if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN || _qt==SHARED_BUFFER_ECN)
                                     routeout->push_back(queues_nup_nc[upper][core][b2_up]->getRemoteEndpoint());
         
                                 //now take the only link down to the destination server!
@@ -1381,13 +1411,13 @@ vector<const Route*>* FatTreeTopology::get_bidir_paths(uint32_t src, uint32_t de
                                 routeout->push_back(queues_nc_nup[core][upper2][b2_down]);
                                 routeout->push_back(pipes_nc_nup[core][upper2][b2_down]);
 
-                                if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN)
+                                if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN || _qt==SHARED_BUFFER_ECN)
                                     routeout->push_back(queues_nc_nup[core][upper2][b2_down]->getRemoteEndpoint());        
 
                                 routeout->push_back(queues_nup_nlp[upper2][HOST_POD_SWITCH(dest)][b1_down]);
                                 routeout->push_back(pipes_nup_nlp[upper2][HOST_POD_SWITCH(dest)][b1_down]);
 
-                                if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN)
+                                if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN || _qt==SHARED_BUFFER_ECN)
                                     routeout->push_back(queues_nup_nlp[upper2][HOST_POD_SWITCH(dest)][b1_down]->getRemoteEndpoint());
         
                                 routeout->push_back(queues_nlp_ns[HOST_POD_SWITCH(dest)][dest][0]);
@@ -1400,19 +1430,19 @@ vector<const Route*>* FatTreeTopology::get_bidir_paths(uint32_t src, uint32_t de
                                     routeback->push_back(queues_ns_nlp[dest][HOST_POD_SWITCH(dest)][0]);
                                     routeback->push_back(pipes_ns_nlp[dest][HOST_POD_SWITCH(dest)][0]);
 
-                                    if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN)
+                                    if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN || _qt==SHARED_BUFFER_ECN)
                                         routeback->push_back(queues_ns_nlp[dest][HOST_POD_SWITCH(dest)][0]->getRemoteEndpoint());
         
                                     routeback->push_back(queues_nlp_nup[HOST_POD_SWITCH(dest)][upper2][b1_down]);
                                     routeback->push_back(pipes_nlp_nup[HOST_POD_SWITCH(dest)][upper2][b1_down]);
 
-                                    if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN)
+                                    if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN || _qt==SHARED_BUFFER_ECN)
                                         routeback->push_back(queues_nlp_nup[HOST_POD_SWITCH(dest)][upper2][b1_down]->getRemoteEndpoint());
         
                                     routeback->push_back(queues_nup_nc[upper2][core][b2_down]);
                                     routeback->push_back(pipes_nup_nc[upper2][core][b2_down]);
 
-                                    if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN)
+                                    if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN || _qt==SHARED_BUFFER_ECN)
                                         routeback->push_back(queues_nup_nc[upper2][core][b2_down]->getRemoteEndpoint());
         
                                     //now take the only link back down to the src server!
@@ -1420,13 +1450,13 @@ vector<const Route*>* FatTreeTopology::get_bidir_paths(uint32_t src, uint32_t de
                                     routeback->push_back(queues_nc_nup[core][upper][b2_up]);
                                     routeback->push_back(pipes_nc_nup[core][upper][b2_up]);
 
-                                    if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN)
+                                    if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN || _qt==SHARED_BUFFER_ECN)
                                         routeback->push_back(queues_nc_nup[core][upper][b2_up]->getRemoteEndpoint());
         
                                     routeback->push_back(queues_nup_nlp[upper][HOST_POD_SWITCH(src)][b1_up]);
                                     routeback->push_back(pipes_nup_nlp[upper][HOST_POD_SWITCH(src)][b1_up]);
 
-                                    if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN)
+                                    if (_qt==LOSSLESS_INPUT || _qt==LOSSLESS_INPUT_ECN || _qt==SHARED_BUFFER_ECN)
                                         routeback->push_back(queues_nup_nlp[upper][HOST_POD_SWITCH(src)][b1_up]->getRemoteEndpoint());
         
                                     routeback->push_back(queues_nlp_ns[HOST_POD_SWITCH(src)][src][0]);
@@ -1437,6 +1467,9 @@ vector<const Route*>* FatTreeTopology::get_bidir_paths(uint32_t src, uint32_t de
                                     routeback->set_reverse(routeout);
                                 }
         
+                                // The source-leaf uplink is b1_up in a
+                                // three-tier fat tree.
+                                routeout->set_source_leaf_uplink(b1_up);
                                 //print_route(*routeout);
                                 paths->push_back(routeout);
                                 check_non_null(routeout);
@@ -1447,6 +1480,7 @@ vector<const Route*>* FatTreeTopology::get_bidir_paths(uint32_t src, uint32_t de
             }
         }
         cout << "pathcount " << paths->size() << endl;
+        finalize_path_ids();
         return paths;
     }
 }

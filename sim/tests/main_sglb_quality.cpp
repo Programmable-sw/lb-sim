@@ -401,8 +401,9 @@ int main() {
     expect(FatTreeSwitch::_sglb_ofat_factor ==
                FatTreeSwitch::SGLB_OFAT_REAL_GCN_RAW_LINEAR,
            "sglb must default to real-GCN raw-linear paper semantics");
-    expect(FatTreeSwitch::_sglb_min_choices == 24,
-           "sglb must default to exact-min24 best-level selection");
+    expect(FatTreeSwitch::_sglb_min_choices == 1 &&
+           FatTreeSwitch::_sglb_candidate_policy == FatTreeSwitch::SGLB_CANDIDATE_WHOLE_GRADE_MIN,
+           "sglb must default to best-grade-only selection");
     expect_near(FatTreeSwitch::_sglb_nmrc_degraded_threshold, 0.05, 1e-12,
                 "sglb good threshold must default to 5 percent");
     expect_near(FatTreeSwitch::_sglb_nmrc_bad_threshold, 0.10, 1e-12,
@@ -689,6 +690,8 @@ int main() {
         FatTreeSwitch::_sglb_min_choices = 3;
         FatTreeSwitch::_sglb_ofat_factor =
             FatTreeSwitch::SGLB_OFAT_REAL_GCN_RAW_LINEAR;
+        const auto saved_policy = FatTreeSwitch::_sglb_candidate_policy;
+        FatTreeSwitch::_sglb_candidate_policy = FatTreeSwitch::SGLB_CANDIDATE_EXACT_MIN;
         FatTreeSwitch::reset_sglb_route_diag();
         for (uint32_t i = 0; i < 64; i++)
             sw.sglb_route(&routes, 79);
@@ -696,6 +699,7 @@ int main() {
                "quantized selection should sample the boundary level and "
                "stop exactly at K");
 
+        FatTreeSwitch::_sglb_candidate_policy = saved_policy;
         FatTreeSwitch::_sglb_ofat_factor = FatTreeSwitch::SGLB_OFAT_BASELINE;
         FatTreeSwitch::reset_sglb_route_diag();
         for (uint32_t i = 0; i < 64; i++)

@@ -309,6 +309,7 @@ PriorityQueue::receivePacket(Packet& pkt)
         //must send the packets to all sources on the same host!
         for (uint32_t i = 0;i<_senders.size();i++){
             EthPausePacket* e = EthPausePacket::newpkt(p->sleepTime(),p->senderID());
+            e->setPausedClass(p->getPausedClass());
             _senders[i]->receivePacket(*e);
         }
 
@@ -451,7 +452,7 @@ FairPriorityQueue::serviceTime(Packet& pkt) {
 }
 
 void
-FairPriorityQueue::receivePacket(Packet& pkt) 
+FairPriorityQueue::receivePacket(Packet& pkt)
 {
     //is this a PAUSE packet?
     if (pkt.type()==ETH_PAUSE){
@@ -474,7 +475,7 @@ FairPriorityQueue::receivePacket(Packet& pkt)
             //cout << timeAsMs(eventlist().now()) << " FPQ " << _name << " GO "<<endl;
 
             //start transmission if we have packets to send!
-            if(queuesize()>0)
+            if(queuesize()>0 && _sending == NULL)
                 beginService();
         }
 
@@ -482,6 +483,7 @@ FairPriorityQueue::receivePacket(Packet& pkt)
         for (uint32_t i = 0;i<_senders.size();i++){
             //cout << "Sending pause" << endl;
             EthPausePacket* e = EthPausePacket::newpkt(p->sleepTime(),p->senderID());
+            e->setPausedClass(p->getPausedClass());
             _senders[i]->receivePacket(*e);
         }
         

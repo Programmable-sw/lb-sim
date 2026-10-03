@@ -34,7 +34,7 @@ def run_case(temp, mixed):
         "-tiers", "2", "-lb", "reps", "-linkspeed", "400000",
         "-queue_type", "composite_ecn_lb", "-host_queue_type", "prio",
         "-mtu", "4096", "-end", "1000", "-paths", "8", "-seed", "13",
-        "-cc", "dcqcn_variant", "-roce_rx_mode", "sp",
+        "-cc", "dctcp_variant", "-roce_rx_mode", "sp",
         "-roce_sack_bitmap_bits", "64",
     ]
     if mixed:

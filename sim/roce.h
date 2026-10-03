@@ -12,6 +12,7 @@
 #include <map>
 #include <set>
 #include <vector>
+#include <deque>
 #include <array>
 #include <ostream>
 #include <tuple>
@@ -39,13 +40,12 @@ class Switch;
 class RoceSrc : public BaseQueue, public TriggerTarget {
     friend class RoceSink;
 public:
-    typedef enum {LB_ECMP = 0, LB_REPS = 1, LB_CONWEAVE = 2, LB_NDP = 3, LB_RR = 4, LB_OPS = 5, LB_MRC = 6, LB_STOR = 7, LB_NETAWARE = 8, LB_NMRC = 9} lb_mode_t;
+    typedef enum {LB_ECMP = 0, LB_REPS = 1, LB_CONWEAVE = 2, LB_NDP = 3, LB_RR = 4, LB_OPS = 5, LB_MRC = 6, LB_STOR = 7, LB_NETAWARE = 8, LB_NMRC = 9, LB_MPRDMA = 10, LB_CONGA = 11} lb_mode_t;
     typedef enum {
         CC_NONE = 0,
-        CC_DCQCN_VARIANT = 1,
-        CC_MPRDMA = 1,
+        CC_DCTCP_VARIANT = 1,
         CC_DCQCN = 2,
-        CC_DCQCN_VARIANT_NODUP_OLD = 3
+        CC_DCTCP_VARIANT_NODUP_OLD = 3
     } cc_mode_t;
     typedef enum {RX_GBN = 0, RX_SP_RETX_QUEUE = 1} rx_mode_t;
     typedef enum {
@@ -144,6 +144,12 @@ public:
     static void setRepsBufferSize(uint32_t size) {_reps_buffer_size = size ? size : 1;}
     static void setRepsWarmupPkts(uint32_t pkts) {_reps_warmup_pkts = pkts;}
     static void setHostsPerTor(uint32_t hosts) {_hosts_per_tor = hosts ? hosts : 1;}
+    static void setCongaUplinks(uint32_t uplinks) {_conga_uplinks = uplinks ? uplinks : 1;}
+    static void resetCongaSharedState();
+    static void updateCongaLocalMetric(uint32_t source_tor, uint32_t uplink,
+                                       uint32_t metric);
+    static uint32_t congaRemoteMetric(uint32_t source_tor, uint32_t destination_tor,
+                                      uint32_t uplink);
     static void resetStorSharedState();
     static void resetNetawareSharedState();
     static void resetStorProfileDiag();
@@ -460,6 +466,17 @@ public:
 
     uint32_t _acked_packets;
     uint32_t _pathid;
+    uint32_t _mprdma_last_vp;
+    RocePacket::seq_t _mprdma_snd_ooh;
+    uint32_t _mprdma_ool_delta_pkts;
+    uint64_t _mprdma_send_count;
+    simtime_picosec _mprdma_last_probe;
+    bool _mprdma_ack_valid;
+    std::vector<bool> _mprdma_pruned;
+    std::map<RocePacket::seq_t, uint32_t> _mprdma_seq_vp;
+    std::deque<uint32_t> _mprdma_ack_clock;
+    uint32_t _conga_flowlet_path;
+    simtime_picosec _conga_last_send;
 
     enum {PAUSED,READY};
 
@@ -507,6 +524,14 @@ public:
     static uint32_t _reps_buffer_size;
     static uint32_t _reps_warmup_pkts;
     static uint32_t _hosts_per_tor;
+    static uint32_t _conga_uplinks;
+    // CONGA's path-congestion table belongs to the source leaf and is indexed
+    // by destination leaf.  All QPs with the same leaf pair must therefore
+    // learn from the same feedback rather than keeping private copies.
+    static std::map<std::pair<uint32_t, uint32_t>, std::vector<uint32_t> >
+        _conga_shared_uplink_scores;
+    static std::map<uint32_t, std::vector<uint32_t> >
+        _conga_local_uplink_scores;
     static simtime_picosec _mrc_failed_retry;
     static uint32_t _mrc_probe_interval_pkts;
     static bool _mrc_failure_recovery_enabled;
@@ -612,6 +637,7 @@ private:
 
     uint32_t choose_path(Packet::PktPriority priority, bool retransmitted);
     void update_reps(const RoceAck& ack);
+    void update_mprdma(const RoceAck& ack);
     void update_conweave(const RoceAck& ack, simtime_picosec rtt);
     void update_netaware(const RoceAck& ack);
     void processFastCnp(const RoceFastCnp& fast_cnp);
@@ -716,7 +742,8 @@ private:
     struct RepsBufferEntry {
         uint32_t cached_ev;
         bool valid;
-        RepsBufferEntry() : cached_ev(0), valid(false) {}
+        bool initialized;
+        RepsBufferEntry() : cached_ev(0), valid(false), initialized(false) {}
     };
     enum MrcPathState {
         MRC_EV_DENIED = 0,
@@ -859,11 +886,17 @@ private:
     SharedWeightedProfile& shared_netaware_profile(uint32_t path_space);
     void ensure_reps_buffer();
     void reset_reps_buffer();
+    void detect_reps_failure();
 
     std::vector<RepsBufferEntry> _reps_buffer;
     uint32_t _reps_head;
     uint32_t _reps_valid_count;
+    uint32_t _reps_initialized_count;
     uint32_t _reps_explore_remaining;
+    uint32_t _reps_current_ev;
+    uint32_t _reps_selected_ev;
+    bool _reps_freezing;
+    simtime_picosec _reps_freezing_until;
     static std::map<std::pair<uint32_t, uint32_t>, SharedWeightedProfile> _stor_shared_profiles;
     static std::map<std::pair<uint32_t, uint32_t>, SharedWeightedProfile> _netaware_shared_profiles;
     static std::array<uint32_t, 4> _stor_level_weights;

@@ -162,7 +162,7 @@ def main():
         for required in (
             "-queue_type composite_ecn_lb",
             "-host_queue_type prio",
-            "-cc dcqcn_variant",
+            "-cc dctcp_variant",
             "-roce_rx_mode sp",
             "-roce_transport_semantics mrc_exact_bounded",
             "-roce_trim_recovery exact",

@@ -194,7 +194,7 @@ Spine 上联。默认规模是 256 节点。自动生成的二层拓扑只接受
 
 ```text
 queue_type = composite_ecn_lb
-cc         = dcqcn_variant
+cc         = dctcp_variant
 rx_mode    = sp
 ecn Kmax   = 0.8 * queue
 EV/pathid  = source 端逐包填写，交换机按单 EV 哈希
@@ -270,6 +270,49 @@ NIC 端只消费 NetAware snapshot，不直接看交换机队列。端侧按 `(s
 
 当前 1us leaf-local/5us spine-export 周期缓存模型与 ECMP-RR、OPS、REPS、MRC、SGLB、AR 的 512-node 七负载对比见 `output/nmrc_periodic_cache_packet_lb_512/nmrc_periodic_cache_packet_lb_512_for_gpt.md`。
 
+## ECMP / CONGA / MP-RDMA / REPS 对齐实验
+
+该对比固定使用二层 leaf-spine；`htsim_roce` 的默认层数也设为 2。普通
+ECMP 使用与 ns-3.19 相同的 MurmurHash3 类五元组哈希。REPS 的 EV 先按
+ECMP 哈希映射到物理路径，交换机不再用普通逐流 ECMP 二次覆盖该选择。
+CONGA 的拥塞表按“源 leaf、目的 leaf”共享，而不是每 QP 私有；flowlet 的
+最终选路在数据包抵达源 leaf、经过主机链路串行化之后完成，因此能读取该 leaf
+已累积的本地 DRE，而不是在端点创建包时过早固定路径。并列最优路径与
+ns-3.19 的 CONGA 实现一致，使用带种子的随机选择。
+
+`run_mprdma_bursty_a2a.py` 默认使用与 ns-3 smoke test 相同的 16 主机、4 leaf、4 spine 两层拓扑，400 Gbps、500 ns 链路、0 ns 交换处理延迟、1 MiB all-to-all 集合流和 4–16 KiB ECMP 短流。四种方案共用 `dctcp_variant`、`shared_buffer_ecn`、20,000 byte ECN 阈值和动态 PFC。
+
+CONGA 使用 Q=3、DRE 时间常数 160 us（32 us 更新周期、alpha=0.2）和 500 us flowlet timeout。报文的 LBTag 由实际 path-id 对应的 source-leaf uplink 生成；ACK 返回 DRE 路径最大值并替换该 uplink 的旧估计。ECN 只进入公共拥塞控制，不再被错误地写成 CONGA metric=255。
+
+seed 13 的最新对齐矩阵位于 `output/htsim_two_tier_aligned_matrix_20260930/results.csv`。每个点均完成 240 条集合流及全部短流，RTO、lossy drop 和 composite drop 均为 0。这个 16 节点同步连续流烟测没有产生 CONGA flowlet timeout；因此单种子的并列路径哈希方差可能改变 CONGA 与 ECMP 的相对次序。5% 点的三种子结果保存在 `output/htsim_two_tier_seed_check_load5_20260930/results.csv`。
+
+### 交换机共享缓冲与动态 PFC
+
+`shared_buffer_ecn` 是增量队列模式；原 `composite_ecn_lb`、`lossless_input_ecn` 均保留。每台 `FatTreeSwitch` 分别维护 ingress port×PG、egress port×queue、ingress/egress service pool、总 ingress buffer 和 per-port headroom 账本。准入顺序与 ns-3.19 一致，先检查 egress，再检查 ingress，成功后原子更新两侧账本；出队按相反方向释放。默认共享池为 9 MiB。400 Gbps、500 ns、4096-byte payload 的自动 headroom 为 58,288 bytes，即 `2*link_flight + 2*(payload+48)`。
+
+每条 ingress link 在 htsim 中对应一个 `LosslessInputQueue`。其动态 PAUSE 门限为：
+
+```text
+2 * 1048 + ingress_alpha * max(0, ingress_sp_limit - ingress_sp_used)
+```
+
+默认 `ingress_alpha=1/16`。1048 bytes 是参考 `SwitchMmu` 的固定保证单元，不随 4096-byte payload 改变。PFC 按 8 个 PG 独立维护，PAUSE 帧持续 5 us；重复 PAUSE 会刷新自动恢复计时器，显式 RESUME 会取消计时器。egress queue 0 严格优先，queue 1–7 round-robin，暂停只阻塞对应 PG。ECN 在释放当前包后按该 egress queue 的 shared bytes 判断；`Kmin=Kmax=20,000` 时为确定性阈值。
+
+配置入口：
+
+```text
+-queue_type shared_buffer_ecn
+-shared_buffer_mb 9
+-shared_ingress_alpha 0.0625
+-shared_egress_alpha 1.0
+-shared_headroom_bytes 58288
+-lossless_ecn_bytes 20000 20000
+```
+
+`shared_egress_alpha` 直接参与单个 egress queue 的动态准入；超过 egress service-pool、port、queue 或动态阈值会被诊断为 overflow。日志中的 `SharedBufferDiag` 给出单交换机峰值、越界次数、最小动态 PAUSE 门限及 PAUSE/RESUME 数量。
+
+共享缓冲重测结果位于 `output/htsim_shared_buffer_matrix_final/results.csv`。
+
 代码入口上，NetAware 使用独立的 `LB_NETAWARE`、NetAware selector 和 ACK snapshot；Avail 和 Grade 都复用 `LB_STOR`、`choose_stor_path` 和 source-ToR 观测管线，分别选择 binary bitmap 与 graded weighted profile。
 
 NetAware 的 feedback cadence 固定在运行时实现中，不再保留反馈周期扫描入口。修改端侧选路或反馈实现后必须先运行 `make -C sim`，再链接 `sim/datacenter/htsim_roce`，避免使用陈旧的 `roce.o`。
@@ -335,7 +378,7 @@ Data packet 携带实际选择的 `mrc_ev`，receiver 在 ACK/NACK 中回显该 
 
 OOO/SACK NACK 只进入 SP/SACK selective retransmission queue，不改变 EV 拥塞状态，也不触发 Go-Back-N replay。当前拥塞性能模式不启用故障恢复：正常 LOSS/RTO 不把 EV 转入故障状态，也不调度 probe；故障状态类型只作为未来接口保留。
 
-`dcqcn_variant` 独立维护 QP 级 congestion window。clean ACK 执行 `cwnd += 1/cwnd`，ECN ACK 执行 `cwnd -= 0.5`；OOO、TRIM、LOSS NACK 和 RTO 都执行 `cwnd -= 1`。默认 Exact+Bounded 传输不维护 `inflate`，发送额度为 `awnd=cwnd-inflight`，唯一 PSN 首次被 ACK/SACK 后才释放额度。MRC path state 与这个 QP 级窗口更新彼此独立。
+`dctcp_variant` 独立维护 QP 级 congestion window。clean ACK 执行 `cwnd += 1/cwnd`，ECN ACK 执行 `cwnd -= 0.5`；OOO、TRIM、LOSS NACK 和 RTO 都执行 `cwnd -= 1`。默认 Exact+Bounded 传输不维护 `inflate`，发送额度为 `awnd=cwnd-inflight`，唯一 PSN 首次被 ACK/SACK 后才释放额度。MRC path state 与这个 QP 级窗口更新彼此独立。
 
 `-lb mrc` 未显式覆盖时使用：
 
@@ -343,7 +386,7 @@ OOO/SACK NACK 只进入 SP/SACK selective retransmission queue，不改变 EV �
 queue_type              = composite_ecn_lb
 roce_rx_mode             = sp
 roce_sack_bitmap_bits    = 64
-cc                       = dcqcn_variant
+cc                       = dctcp_variant
 roce_transport_semantics = mrc_exact_bounded
 roce_trim_recovery       = exact
 ecn_thresh               = 0.8
@@ -354,7 +397,7 @@ mrc_congestion_reaction  = skip_once
 mrc_failure_recovery     = disabled
 ```
 
-上表描述的是只写 `-lb mrc` 时的 CLI 默认值。`dcqcn_variant` 会在 MRC 根据 ECN 冷却精确 EV 的同时调整 source congestion window；显式使用 `-cc none` 时仍保留 MRC path-state 更新，但不做额外的发送窗口控制。当前 canonical MRC 性能矩阵使用 `dcqcn_variant`，`cc=none` 只作为拥塞控制 ablation。
+上表描述的是只写 `-lb mrc` 时的 CLI 默认值。`dctcp_variant` 会在 MRC 根据 ECN 冷却精确 EV 的同时调整 source congestion window；显式使用 `-cc none` 时仍保留 MRC path-state 更新，但不做额外的发送窗口控制。当前 canonical MRC 性能矩阵使用 `dctcp_variant`，`cc=none` 只作为拥塞控制 ablation。
 
 显式使用 `-cc dcqcn` 会切换到 rate-based DCQCN。该模式当前按
 `400 Gbit/s / 7 us RTT / 350000-byte BDP` 校准，默认使用
@@ -363,7 +406,7 @@ mrc_failure_recovery     = disabled
 的路径选择和反馈语义。完整扫描与 ECMP 验证结果保存在
 `output/nmrc_ecmp_dcqcn_400g_calibration/`。
 
-运行时 `MrcEvModelDiag` 应报告 `mrc_active_evs=64 mrc_backup_evs=0`、identity mapping 和 alias ratio 1；`MrcPolicyDiag` 应报告 `policy=skip_once all_skip_resolution=ordinary_rotation`；`MrcFailureRecoveryDiag` 应报告 `enabled=0`。默认 `FinalCcMrcConfig` 继续报告 `dcqcn_variant_inflate=disabled mrc_ecn_trim_penalty=mode_uniform roce_trim_recovery=exact`。
+运行时 `MrcEvModelDiag` 应报告 `mrc_active_evs=64 mrc_backup_evs=0`、identity mapping 和 alias ratio 1；`MrcPolicyDiag` 应报告 `policy=skip_once all_skip_resolution=ordinary_rotation`；`MrcFailureRecoveryDiag` 应报告 `enabled=0`。默认 `FinalCcMrcConfig` 继续报告 `dctcp_variant_inflate=disabled mrc_ecn_trim_penalty=mode_uniform roce_trim_recovery=exact`。
 
 此前大量 Natural+Cumulative 数据使用旧传输底座。该底座暂留为显式历史复现入口：
 
@@ -372,7 +415,7 @@ mrc_failure_recovery     = disabled
 -roce_trim_recovery cumulative
 ```
 
-此时 `FinalCcMrcConfig` 报告 `dcqcn_variant_inflate=natural`。该入口不影响新的默认 Exact+Bounded。
+此时 `FinalCcMrcConfig` 报告 `dctcp_variant_inflate=natural`。该入口不影响新的默认 Exact+Bounded。
 
 ## `conweave`
 

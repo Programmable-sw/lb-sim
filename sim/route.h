@@ -46,6 +46,8 @@ class Route {
     inline int path_id() const {return _path_id;}
     inline int no_of_paths() const {return _no_of_paths;}
     inline uint32_t hop_count() const {return _hop_count;}
+    void set_source_leaf_uplink(uint32_t uplink) {_source_leaf_uplink = uplink;}
+    inline uint32_t source_leaf_uplink() const {return _source_leaf_uplink;}
  private:
     void update_hopcount(PacketSink* sink);
     vector<PacketSink*> _sinklist;
@@ -53,6 +55,7 @@ class Route {
     Route* _reverse;
     int _path_id; //path identifier for this path
     int _no_of_paths; //total number of paths sender is using
+    uint32_t _source_leaf_uplink;
 };
 //typedef vector<PacketSink*> route_t;
 typedef Route route_t;

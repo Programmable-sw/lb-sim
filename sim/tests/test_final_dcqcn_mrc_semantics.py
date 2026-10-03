@@ -14,7 +14,7 @@ def run(traffic, output, extra_args):
         str(BINARY), "-o", str(output), "-tm", str(traffic),
         "-nodes", "256", "-conns", "0", "-tiers", "2", "-lb", "mrc",
         "-roce_rx_mode", "sp", "-queue_type", "composite_ecn_lb",
-        "-host_queue_type", "prio", "-cc", "dcqcn_variant", "-end", "1",
+        "-host_queue_type", "prio", "-cc", "dctcp_variant", "-end", "1",
         "-linkspeed", "400000", "-paths", "64", *extra_args,
     ]
     return subprocess.run(
@@ -31,7 +31,7 @@ def main():
         if final.returncode != 0:
             raise AssertionError(final.stdout)
         expected = (
-            "FinalCcMrcConfig dcqcn_variant_inflate=disabled "
+            "FinalCcMrcConfig dctcp_variant_inflate=disabled "
             "mrc_ecn_trim_penalty=mode_uniform")
         if expected not in final.stdout:
             raise AssertionError(f"missing final semantics: {expected!r}")
@@ -56,7 +56,7 @@ def main():
             raise AssertionError(
                 f"missing explicit legacy transport config: {legacy_diag!r}")
         legacy_cc = (
-            "FinalCcMrcConfig dcqcn_variant_inflate=natural "
+            "FinalCcMrcConfig dctcp_variant_inflate=natural "
             "mrc_ecn_trim_penalty=mode_uniform")
         if legacy_cc not in legacy.stdout:
             raise AssertionError(
@@ -78,9 +78,9 @@ def main():
 
         removed = [
             ["-mrc_trim_cool", "off"],
-            ["-dcqcn_variant_sack_inflate", "clear"],
-            ["-dcqcn_variant_inflate_mode", "legacy_clear_all"],
-            ["-dcqcn_variant_nack_recovery_gate", "on"],
+            ["-dctcp_variant_sack_inflate", "clear"],
+            ["-dctcp_variant_inflate_mode", "legacy_clear_all"],
+            ["-dctcp_variant_nack_recovery_gate", "on"],
             ["-mrc_cooldown_mode", "fixed"],
             ["-mrc_cooldown_mode", "adaptive"],
             ["-mrc_cooldown_mode", "window_scaled"],

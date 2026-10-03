@@ -4,6 +4,8 @@
 
 #include "switch.h"
 #include "callback_pipe.h"
+#include "../shared_buffer.h"
+#include "../broadcom_mmu.h"
 #include "rocepacket.h"
 #include <set>
 #include <map>
@@ -91,8 +93,28 @@ public:
 
 };
 
-class FatTreeSwitch : public Switch {
+class FatTreeSwitch : public Switch, public SharedBufferSwitch {
 public:
+    static uint64_t _shared_buffer_bytes;
+    static double _shared_ingress_alpha;
+    static double _shared_egress_alpha;
+    static uint64_t _shared_headroom_bytes;
+    static uint64_t _shared_buffer_overflows_total;
+    static uint64_t _shared_buffer_peak_bytes;
+    void shared_register_ingress(const void* queue);
+    void shared_register_egress(const void* queue);
+    Admission shared_admit(const void* ingress, uint32_t pg,
+                            const void* egress, uint32_t queue, uint64_t bytes);
+    void shared_release(const void* ingress, uint32_t pg,
+                        const void* egress, uint32_t queue, uint64_t bytes);
+    bool shared_should_pause(const void* ingress, uint32_t pg) const;
+    bool shared_should_resume(const void* ingress, uint32_t pg) const;
+    uint64_t shared_pause_threshold(uint32_t pg) const;
+    bool shared_should_mark_ecn(const void* egress, uint32_t queue,
+                                uint64_t kmin, uint64_t kmax,
+                                double sample01) const;
+    uint64_t shared_buffer_used() const;
+    uint64_t shared_buffer_overflows() const { return _shared_buffer_overflows; }
     enum switch_type {
         NONE = 0, TOR = 1, AGG = 2, CORE = 3
     };
@@ -263,7 +285,8 @@ public:
     enum SglbCandidatePolicy {
         SGLB_CANDIDATE_STRICT_K = 0,
         SGLB_CANDIDATE_WHOLE_GRADE_MIN = 1,
-        SGLB_CANDIDATE_EXACT_MIN = 2
+        SGLB_CANDIDATE_EXACT_MIN = 2,
+        SGLB_CANDIDATE_SCORE_TOPK = 3
     };
 
     enum SglbCandidateDispatch {
@@ -564,12 +587,15 @@ public:
         double utilization_fraction;
         linkspeed_bps bitrate;
         simtime_picosec last_update;
+        uint64_t bytes_sent;
+        double dre_pressure;
         bool paused;
         bool valid;
 
         NetawarePortSnapshot()
             : queue_fraction(0.0), utilization_fraction(0.0), bitrate(0),
-              last_update(0), paused(false), valid(false) {}
+              last_update(0), bytes_sent(0), dre_pressure(0.0),
+              paused(false), valid(false) {}
     };
 
     struct StorEvState {
@@ -791,6 +817,10 @@ public:
     static uint16_t _ar_sticky;
     static simtime_picosec _sticky_delta;
     static double _ecn_threshold_fraction;
+    // Optional absolute ECN thresholds for lossless_input_ecn queues.
+    // Zero keeps the historical 20%/80% defaults.
+    static uint64_t _lossless_ecn_kmin_bytes;
+    static uint64_t _lossless_ecn_kmax_bytes;
     static double _speculative_threshold_fraction;
     static double _sglb_downstream_weight;
     static double _sglb_queue_weight;
@@ -803,6 +833,7 @@ public:
     static simtime_picosec _sglb_update_interval;
     static uint32_t _sglb_quality_levels;
     static uint32_t _sglb_min_choices;
+    static uint32_t _sglb_topk;
     static SglbCandidatePolicy _sglb_candidate_policy;
     static SglbCandidateDispatch _sglb_candidate_dispatch;
     static SglbGcnCadence _sglb_gcn_cadence;
@@ -1040,6 +1071,10 @@ private:
     };
 
     switch_type _type;
+    BroadcomMmu* _shared_mmu;
+    unordered_map<const void*,uint32_t> _shared_ingress_ports;
+    unordered_map<const void*,uint32_t> _shared_egress_ports;
+    uint64_t _shared_buffer_overflows;
     Pipe* _pipe;
     FatTreeTopology* _ft;
     
@@ -1047,6 +1082,10 @@ private:
     vector<FibEntry*>* _uproutes;
 
     unordered_map<uint32_t,FlowletInfo*> _flowlet_maps;
+    // CONGA flowlets are source-leaf state. They must be created when a
+    // packet reaches the leaf, after host-link serialization, rather than at
+    // endpoint packet creation time.
+    unordered_map<uint32_t,FlowletInfo*> _conga_flowlet_maps;
     unordered_map<uint32_t,NetawareState> _netaware_states;
     unordered_map<uint32_t,StorState> _stor_states;
     unordered_map<uint32_t,uint32_t> _drill_memory;
@@ -1086,6 +1125,28 @@ private:
     SglbGcnTimer* _sglb_gcn_timer;
     bool _sglb_gcn_timer_pending;
     unordered_map<BaseQueue*,NetawarePortSnapshot> _netaware_local_state;
+    struct CongaDreState {
+        uint64_t bytes;
+        simtime_picosec last_decay;
+        CongaDreState() : bytes(0), last_decay(0) {}
+    };
+    unordered_map<BaseQueue*,CongaDreState> _conga_dre;
+    struct CongaPathInfo {
+        uint8_t metric;
+        simtime_picosec updated;
+        bool dirty;
+        CongaPathInfo() : metric(0), updated(0), dirty(false) {}
+        CongaPathInfo(uint8_t value, simtime_picosec when, bool changed = false)
+            : metric(value), updated(when), dirty(changed) {}
+    };
+    // CONGA paper tables, local to each ToR. FromLeaf contains congestion
+    // learned from arriving data; ToLeaf contains reverse-data feedback used
+    // to choose a path to a destination leaf.
+    unordered_map<uint32_t, unordered_map<uint32_t,CongaPathInfo> >
+        _conga_from_leaf;
+    unordered_map<uint32_t, unordered_map<uint32_t,CongaPathInfo> >
+        _conga_to_leaf;
+    unordered_map<uint32_t,uint32_t> _conga_feedback_cursor;
     unordered_map<uint32_t,NetawareExportState> _netaware_exported_state;
     NetawareExportTimer* _netaware_export_timer;
     bool _netaware_export_timer_pending;

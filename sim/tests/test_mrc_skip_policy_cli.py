@@ -29,7 +29,7 @@ def run(traffic: Path, topology: Path, output: Path, extra_args,
         "-nodes", nodes, "-conns", "0", "-tiers", "2", "-lb", "mrc",
         *topology_args,
         "-roce_rx_mode", "sp", "-queue_type", "composite_ecn_lb",
-        "-host_queue_type", "prio", "-cc", "dcqcn_variant", "-end", "1",
+        "-host_queue_type", "prio", "-cc", "dctcp_variant", "-end", "1",
         "-linkspeed", "400000", "-paths", "64", *extra_args,
     ]
     return subprocess.run(

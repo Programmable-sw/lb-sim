@@ -89,7 +89,7 @@ oversubscribed_fat_tree_topology.o: oversubscribed_fat_tree_topology.cpp oversub
 multihomed_fat_tree_topology.o: multihomed_fat_tree_topology.cpp multihomed_fat_tree_topology.h topology.h ${DEPS}
 	$(CC) $(INCLUDE) $(CFLAGS) -c multihomed_fat_tree_topology.cpp
 
-fat_tree_switch.o: fat_tree_switch.h fat_tree_switch.cpp ${DEPS}
+fat_tree_switch.o: fat_tree_switch.h fat_tree_switch.cpp sglb_score_topk.h ${DEPS}
 	$(CC) $(INCLUDE) $(CFLAGS) -c fat_tree_switch.cpp
 
 main_eqds.o: main_eqds.cpp

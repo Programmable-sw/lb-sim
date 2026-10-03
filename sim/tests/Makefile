@@ -1,6 +1,10 @@
 LIBS=-L.. -lhtsim
 INCLUDE= -I../ -I./
 LIBDEP=../libhtsim.a
+.DEFAULT_GOAL := all
+htsim_sglb_score_topk: main_sglb_score_topk.cpp ../datacenter/sglb_score_topk.h
+	g++ -std=c++11 -Wall -O2 main_sglb_score_topk.cpp -o htsim_sglb_score_topk
+
 CC=g++
 CFLAGS = -Wall -std=c++11 -g -Wsign-compare
 #CFLAGS += -fsanitize=address -fno-omit-frame-pointer -fsanitize=undefined
@@ -8,7 +12,13 @@ CFLAGS += -O2
 SGLB_DATACENTER_OBJ_NAMES=firstfit.o vl2_topology.o fat_tree_topology.o bcube_topology.o connection_matrix.o oversubscribed_fat_tree_topology.o shortflows.o multihomed_fat_tree_topology.o star_topology.o fat_tree_switch.o
 SGLB_DATACENTER_OBJS=$(addprefix ../datacenter/,$(SGLB_DATACENTER_OBJ_NAMES))
 
-all:	htsim_dumbell_ndp htsim_dumbell_ndptunnel htsim_dumbell_tcp htsim_dumbell_swift htsim_multihop_swift htsim_multihop_swift2 htsim_bidir_swift htsim_bidir_ndp htsim_multipath_swift htsim_trigger_test htsim_dumbell_roce htsim_roce_gbn_ooo htsim_roce_sack_fields htsim_roce_sp_sack_correctness htsim_roce_exact_bounded_recovery htsim_roce_schedule htsim_roce_reps_warmup htsim_roce_reps_mrc_semantics htsim_roce_mrc_skip_semantics htsim_hybrid_nmrc htsim_sglb_quality htsim_sglb_gcn htsim_paper_sglb htsim_nmrc_score htsim_nmrc_shuffled_bucket htsim_stor_feedback htsim_stor_score_trace htsim_composite_ecn htsim_lossless_ecn_counter htsim_connection_matrix_lb htsim_dumbell_hpcc htsim_dumbell_strack
+all:	htsim_broadcom_mmu htsim_conga_model htsim_dumbell_ndp htsim_dumbell_ndptunnel htsim_dumbell_tcp htsim_dumbell_swift htsim_multihop_swift htsim_multihop_swift2 htsim_bidir_swift htsim_bidir_ndp htsim_multipath_swift htsim_trigger_test htsim_dumbell_roce htsim_roce_gbn_ooo htsim_roce_sack_fields htsim_roce_sp_sack_correctness htsim_roce_exact_bounded_recovery htsim_roce_schedule htsim_roce_reps_warmup htsim_roce_reps_mrc_semantics htsim_roce_mrc_skip_semantics htsim_hybrid_nmrc htsim_sglb_quality htsim_sglb_gcn htsim_paper_sglb htsim_nmrc_score htsim_nmrc_shuffled_bucket htsim_stor_feedback htsim_stor_score_trace htsim_composite_ecn htsim_lossless_ecn_counter htsim_connection_matrix_lb htsim_dumbell_hpcc htsim_dumbell_strack
+
+htsim_broadcom_mmu: main_broadcom_mmu.cpp ../broadcom_mmu.h
+	$(CC) $(CFLAGS) main_broadcom_mmu.cpp -o htsim_broadcom_mmu
+
+htsim_conga_model: main_conga_model.cpp ../conga_model.h
+	$(CC) $(CFLAGS) main_conga_model.cpp -o htsim_conga_model
 
 htsim_connection_matrix_lb:	main_connection_matrix_lb.o $(LIBDEP) ../datacenter/connection_matrix.o
 	$(CC) $(CFLAGS) main_connection_matrix_lb.o ../datacenter/connection_matrix.o -o htsim_connection_matrix_lb $(LIBS)

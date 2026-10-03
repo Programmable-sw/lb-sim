@@ -1,5 +1,6 @@
 // -*- c-basic-offset: 4; indent-tabs-mode: nil -*-
 #include "fat_tree_switch.h"
+#include "sglb_score_topk.h"
 #include "routetable.h"
 #include "fat_tree_topology.h"
 #include "callback_pipe.h"
@@ -8,13 +9,46 @@
 #include "compositequeue.h"
 #include "ecnqueue.h"
 #include "rocepacket.h"
+#include "roce.h"
 #include "sglbpacket.h"
 #include "ecn.h"
+#include "../conga_model.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
 
 unordered_map<BaseQueue*,uint32_t> FatTreeSwitch::_port_flow_counts;
+uint64_t FatTreeSwitch::_shared_buffer_bytes = 9ULL * 1024 * 1024;
+double FatTreeSwitch::_shared_ingress_alpha = 0.0625;
+double FatTreeSwitch::_shared_egress_alpha = 1.0;
+uint64_t FatTreeSwitch::_shared_headroom_bytes = 256 * 1024;
+uint64_t FatTreeSwitch::_shared_buffer_overflows_total = 0;
+uint64_t FatTreeSwitch::_shared_buffer_peak_bytes = 0;
+
+// Match the ns-3.19 experiment's MurmurHash3-style five-tuple ECMP family.
+// htsim does not carry UDP ports separately, so the stable flow id occupies
+// the transport tuple word.
+static uint32_t paper_ecmp_hash(uint32_t src, uint32_t dst, uint32_t flow,
+                                uint32_t seed) {
+    const uint32_t words[3] = {src, dst, flow};
+    uint32_t h = seed;
+    for (uint32_t i = 0; i < 3; ++i) {
+        uint32_t k = words[i];
+        k *= 0xcc9e2d51u;
+        k = (k << 15) | (k >> 17);
+        k *= 0x1b873593u;
+        h ^= k;
+        h = (h << 13) | (h >> 19);
+        h += (h << 2) + 0xe6546b64u;
+    }
+    h ^= 12u;
+    h ^= h >> 16;
+    h *= 0x85ebca6bu;
+    h ^= h >> 13;
+    h *= 0xc2b2ae35u;
+    h ^= h >> 16;
+    return h;
+}
 
 static uint64_t paper_sglb_remote_key(uint32_t spine, uint32_t destination_tor) {
     return (static_cast<uint64_t>(spine) << 32) | destination_tor;
@@ -129,6 +163,12 @@ private:
 FatTreeSwitch::FatTreeSwitch(EventList& eventlist, string s, switch_type t, uint32_t id,simtime_picosec delay, FatTreeTopology* ft): Switch(eventlist, s) {
     _id = id;
     _type = t;
+    // The reference SwitchMmu uses a 1048-byte cell/guarantee quantum even
+    // when the experiment payload is configured larger.
+    _shared_mmu = new BroadcomMmu(_shared_buffer_bytes,
+        1048, _shared_ingress_alpha,
+        _shared_egress_alpha, _shared_headroom_bytes);
+    _shared_buffer_overflows = 0;
     _pipe = new CallbackPipe(delay,eventlist, this);
     _uproutes = NULL;
     _ft = ft;
@@ -145,6 +185,66 @@ FatTreeSwitch::FatTreeSwitch(EventList& eventlist, string s, switch_type t, uint
     _paper_sglb_gcn_dirty = false;
     _paper_sglb_gcn_has_sent = false;
     _fib = new RouteTable();
+}
+
+void FatTreeSwitch::shared_register_ingress(const void* queue) {
+    if (_shared_ingress_ports.count(queue)) return;
+    uint32_t port = _shared_ingress_ports.size() + 1;
+    _shared_ingress_ports[queue] = port;
+    _shared_mmu->registerIngressPort(port);
+}
+
+void FatTreeSwitch::shared_register_egress(const void* queue) {
+    if (_shared_egress_ports.count(queue)) return;
+    uint32_t port = _shared_egress_ports.size() + 1;
+    _shared_egress_ports[queue] = port;
+    _shared_mmu->registerEgressPort(port);
+}
+
+SharedBufferSwitch::Admission FatTreeSwitch::shared_admit(
+        const void* ingress, uint32_t pg, const void* egress,
+        uint32_t queue, uint64_t bytes) {
+    shared_register_ingress(ingress);
+    shared_register_egress(egress);
+    BroadcomMmu::Admission result = _shared_mmu->admit(
+        _shared_ingress_ports[ingress], pg, _shared_egress_ports[egress],
+        queue, bytes);
+    if (result != BroadcomMmu::ADMIT) {
+        ++_shared_buffer_overflows;
+        ++_shared_buffer_overflows_total;
+    } else if (_shared_mmu->totalIngressBytes() > _shared_buffer_peak_bytes) {
+        _shared_buffer_peak_bytes = _shared_mmu->totalIngressBytes();
+    }
+    return result == BroadcomMmu::ADMIT ? ADMIT :
+        result == BroadcomMmu::DROP_EGRESS ? DROP_EGRESS : DROP_INGRESS;
+}
+
+void FatTreeSwitch::shared_release(const void* ingress, uint32_t pg,
+        const void* egress, uint32_t queue, uint64_t bytes) {
+    _shared_mmu->release(_shared_ingress_ports.at(ingress), pg,
+        _shared_egress_ports.at(egress), queue, bytes);
+}
+
+bool FatTreeSwitch::shared_should_pause(const void* ingress, uint32_t pg) const {
+    return _shared_mmu->shouldPause(_shared_ingress_ports.at(ingress), pg);
+}
+
+bool FatTreeSwitch::shared_should_resume(const void* ingress, uint32_t pg) const {
+    return _shared_mmu->shouldResume(_shared_ingress_ports.at(ingress), pg);
+}
+
+uint64_t FatTreeSwitch::shared_pause_threshold(uint32_t pg) const {
+    return _shared_mmu->pauseThresholdBytes(pg);
+}
+
+bool FatTreeSwitch::shared_should_mark_ecn(const void* egress, uint32_t queue,
+        uint64_t kmin, uint64_t kmax, double sample01) const {
+    return _shared_mmu->shouldMarkEcn(_shared_egress_ports.at(egress), queue,
+        kmin, kmax, sample01);
+}
+
+uint64_t FatTreeSwitch::shared_buffer_used() const {
+    return _shared_mmu->totalIngressBytes();
 }
 
 void FatTreeSwitch::receivePacket(Packet& pkt){
@@ -183,6 +283,38 @@ void FatTreeSwitch::receivePacket(Packet& pkt){
             _packets.erase(&pkt);
             pkt.free();
             return;
+        }
+        // CONGA DRE is updated by every data packet on an inter-switch link,
+        // including ECMP short flows. Tagged CONGA packets carry the maximum
+        // Q=3 metric observed along their path.
+        if (_strategy == ECMP) {
+            BaseQueue* egress = nh->size() ? dynamic_cast<BaseQueue*>(nh->at(0)) : NULL;
+            if (egress && !egress->is_last_hop()) {
+                const simtime_picosec period = timeFromUs(32.0);
+                const simtime_picosec tau = timeFromUs(160.0);
+                CongaDreState& state = _conga_dre[egress];
+                const simtime_picosec now = eventlist().now();
+                if (!state.last_decay)
+                    state.last_decay = now;
+                if (now > state.last_decay) {
+                    const uint64_t periods = (now - state.last_decay) / period;
+                    if (periods) {
+                        state.bytes = conga_decay_dre(state.bytes, periods);
+                        state.last_decay += periods * period;
+                    }
+                }
+                state.bytes += pkt.size() + 48;
+                const uint32_t metric = conga_quantize_dre(
+                    state.bytes, egress->bitrate(), tau, 3);
+                if (pkt.type() == ROCE &&
+                    ((RocePacket&)pkt).lbtag() != UINT32_MAX) {
+                    RocePacket& data = (RocePacket&)pkt;
+                    data.set_conga_metric(metric);
+                    if (_type == TOR)
+                        RoceSrc::updateCongaLocalMetric(
+                            _id, data.lbtag(), metric);
+                }
+            }
         }
         //set next hop which is peer switch.
         pkt.set_route(*nh);
@@ -1027,6 +1159,8 @@ uint16_t FatTreeSwitch::_ar_fraction = 0;
 uint16_t FatTreeSwitch::_ar_sticky = FatTreeSwitch::PER_PACKET;
 simtime_picosec FatTreeSwitch::_sticky_delta = timeFromUs((uint32_t)10);
 double FatTreeSwitch::_ecn_threshold_fraction = 1.0;
+uint64_t FatTreeSwitch::_lossless_ecn_kmin_bytes = 0;
+uint64_t FatTreeSwitch::_lossless_ecn_kmax_bytes = 0;
 double FatTreeSwitch::_speculative_threshold_fraction = 0.2;
 double FatTreeSwitch::_sglb_downstream_weight = 0.25;
 double FatTreeSwitch::_sglb_queue_weight = 0.5;
@@ -1038,7 +1172,8 @@ double FatTreeSwitch::_sglb_quality_bucket = 20.0;
 uint32_t FatTreeSwitch::_sglb_max_quality = 7;
 simtime_picosec FatTreeSwitch::_sglb_update_interval = timeFromUs(1.0);
 uint32_t FatTreeSwitch::_sglb_quality_levels = 8;
-uint32_t FatTreeSwitch::_sglb_min_choices = 20;
+uint32_t FatTreeSwitch::_sglb_min_choices = 1;
+uint32_t FatTreeSwitch::_sglb_topk = 20;
 FatTreeSwitch::SglbCandidatePolicy FatTreeSwitch::_sglb_candidate_policy =
     FatTreeSwitch::SGLB_CANDIDATE_WHOLE_GRADE_MIN;
 FatTreeSwitch::SglbCandidateDispatch FatTreeSwitch::_sglb_candidate_dispatch =
@@ -1836,9 +1971,14 @@ uint8_t FatTreeSwitch::sglb_nmrc_level(double score) {
 
 uint8_t FatTreeSwitch::sglb_nmrc_quantized_level(double score,
                                                   uint32_t levels) {
+    if (levels == 16) {
+        score = std::max(0.0, std::min(1.0, score));
+        const uint32_t level = static_cast<uint32_t>(score * 16.0);
+        return static_cast<uint8_t>(level >= 16 ? 15 : level);
+    }
     if (levels == 8) {
         static const double thresholds[7] = {
-            0.05, 0.10, 0.25, 0.40, 0.50, 0.60, 0.80
+            0.125, 0.250, 0.375, 0.500, 0.625, 0.750, 0.875
         };
         for (uint8_t level = 0; level < 7; level++) {
             if (score < thresholds[level])
@@ -1887,7 +2027,7 @@ void FatTreeSwitch::configure_sglb_scheme_defaults(bool legacy) {
     }
 
     _sglb_ofat_factor = SGLB_OFAT_REAL_GCN_RAW_LINEAR;
-    _sglb_min_choices = 20;
+    _sglb_min_choices = 1;
     _sglb_candidate_policy = SGLB_CANDIDATE_WHOLE_GRADE_MIN;
     _sglb_candidate_dispatch = SGLB_DISPATCH_RANDOM;
     _sglb_gcn_cadence = SGLB_GCN_INDEPENDENT;
@@ -3551,7 +3691,12 @@ uint32_t FatTreeSwitch::sglb_route(vector<FibEntry*>* ecmp_set, uint32_t dst,
     bool use_shuffled_rr = false;
     uint32_t rr_dst_tor = dst;
     uint64_t rr_quality_signature = 0;
-    if (sglb_ofat_uses_topk8()) {
+    if (_sglb_candidate_policy == SGLB_CANDIDATE_SCORE_TOPK) {
+        vector<uint64_t> tie_keys(ecmp_set->size(), 0);
+        for (uint32_t i = 0; i < ecmp_set->size(); ++i)
+            tie_keys[i] = (static_cast<uint64_t>(random()) << 32) ^ random();
+        best_choices = sglb_score_topk(scores, available, tie_keys, _sglb_topk);
+    } else if (sglb_ofat_uses_topk8()) {
         vector<uint64_t> tie_keys(ecmp_set->size(), 0);
         for (uint32_t i = 0; i < ecmp_set->size(); ++i)
             tie_keys[i] = (static_cast<uint64_t>(random()) << 32) ^ random();
@@ -3662,12 +3807,59 @@ uint32_t FatTreeSwitch::drill_route(vector<FibEntry*>* ecmp_set, uint32_t dst) {
 }
 
 uint32_t FatTreeSwitch::pathid_ecmp_choice(Packet& pkt, uint32_t hop_count, packet_direction direction) {
-    if (!_pathid_only_hash)
-        return freeBSDHash(pkt.flow_id(), pkt.pathid(), _hash_salt) % hop_count;
+    uint32_t choice = UINT32_MAX;
+    // REPS changes the UDP source port to a 16-bit entropy value. Model that
+    // operation at the source ToR instead of mapping EV->path at the endpoint.
+    if (_type == TOR && direction == UP && pkt.type() == ROCE) {
+        RocePacket& data = (RocePacket&)pkt;
+        if (data.reps_entropy() && data.routing_entropy() != UINT32_MAX) {
+            // REPS replaces UDP source port with the 16-bit EV. htsim has no
+            // UDP header, so use the stable flow id as the destination-port
+            // identity and pack the two 16-bit ports exactly as ECMP does.
+            const uint32_t ports =
+                (data.routing_entropy() & 0xffffu) |
+                ((pkt.flow_id() & 0xffffu) << 16);
+            choice = paper_ecmp_hash(data.src(), data.dst(),
+                                     ports, _id) % hop_count;
+            if (getenv("HTSIM_ECMP_DIAG")) {
+                cerr << "EcmpDecision time_ps=" << eventlist().now()
+                     << " leaf=" << _id
+                     << " flow=" << pkt.flow_id()
+                     << " dst_leaf=" << (_ft ? _ft->HOST_POD_SWITCH(pkt.dst()) : 0)
+                     << " selected=" << choice
+                     << " pathid=" << pkt.pathid() << endl;
+            }
+            return choice;
+        }
+    }
+    if (!_pathid_only_hash) {
+        choice = paper_ecmp_hash(pkt.flow_id(), pkt.dst(),
+                                 pkt.flow_id() ^ pkt.dst(), _id) % hop_count;
+        if (_type == TOR && direction == UP && pkt.type() == ROCE &&
+            getenv("HTSIM_ECMP_DIAG")) {
+            cerr << "EcmpDecision time_ps=" << eventlist().now()
+                 << " leaf=" << _id
+                 << " flow=" << pkt.flow_id()
+                 << " dst_leaf=" << (_ft ? _ft->HOST_POD_SWITCH(pkt.dst()) : 0)
+                 << " selected=" << choice
+                 << " pathid=" << pkt.pathid() << endl;
+        }
+        return choice;
+    }
 
     uint32_t pathid = pkt.pathid();
-    if (_type == TOR)
-        return pathid % hop_count;
+    if (_type == TOR) {
+        choice = pathid % hop_count;
+        if (direction == UP && pkt.type() == ROCE && getenv("HTSIM_ECMP_DIAG")) {
+            cerr << "EcmpDecision time_ps=" << eventlist().now()
+                 << " leaf=" << _id
+                 << " flow=" << pkt.flow_id()
+                 << " dst_leaf=" << (_ft ? _ft->HOST_POD_SWITCH(pkt.dst()) : 0)
+                 << " selected=" << choice
+                 << " pathid=" << pkt.pathid() << endl;
+        }
+        return choice;
+    }
 
     uint32_t tor_choices = _ft->radix_up(TOR_TIER);
     if (tor_choices == 0)
@@ -3764,6 +3956,7 @@ FatTreeSwitch::netaware_read_port_snapshot(BaseQueue* q) {
     snapshot.bitrate = q->bitrate();
     LosslessOutputQueue* lq = dynamic_cast<LosslessOutputQueue*>(q);
     snapshot.paused = lq && lq->is_paused();
+    snapshot.bytes_sent = q->bytes_sent_count();
     snapshot.last_update = eventlist().now();
     snapshot.valid = true;
     return snapshot;
@@ -3777,8 +3970,25 @@ FatTreeSwitch::netaware_local_snapshot(BaseQueue* q) {
     NetawarePortSnapshot& cached = _netaware_local_state[q];
     simtime_picosec now = eventlist().now();
     if (netaware_snapshot_refresh_due(cached, now,
-                                  _netaware_state_update_interval))
-        cached = netaware_read_port_snapshot(q);
+                                  _netaware_state_update_interval)) {
+        NetawarePortSnapshot sample = netaware_read_port_snapshot(q);
+        if (cached.valid && sample.last_update > cached.last_update &&
+            sample.bitrate > 0 && sample.bytes_sent >= cached.bytes_sent) {
+            double dt = timeAsSec(sample.last_update - cached.last_update);
+            double rate = dt > 0.0 ?
+                ((double)(sample.bytes_sent - cached.bytes_sent) * 8.0) /
+                (dt * (double)sample.bitrate) : 0.0;
+            if (rate > 1.0)
+                rate = 1.0;
+            // DRE EWMA: fast response to bursts, gradual aging after idle.
+            const double alpha = 0.25;
+            sample.dre_pressure = (1.0 - alpha) * cached.dre_pressure +
+                                  alpha * rate;
+            sample.utilization_fraction = std::max(
+                sample.utilization_fraction, sample.dre_pressure);
+        }
+        cached = sample;
+    }
     return cached;
 }
 
@@ -3798,7 +4008,7 @@ FatTreeSwitch::netaware_compute_export_state(uint32_t dst) {
             if (route && route->size() > 0)
                 q = dynamic_cast<BaseQueue*>(route->at(0));
         }
-        state.ports.push_back(netaware_read_port_snapshot(q));
+        state.ports.push_back(netaware_local_snapshot(q));
     }
     state.last_update = eventlist().now();
     state.valid = true;
@@ -4553,6 +4763,24 @@ Route* FatTreeSwitch::getNextHop(Packet& pkt, BaseQueue* ingress_port){
         leaf_routing ? _ft->HOST_POD_SWITCH(pkt.dst()) : 0;
     const bool directly_connected =
         leaf_routing && _type == TOR && destination_leaf == _id;
+    // Receiver-side CONGA processing.  The forward path estimate is retained
+    // in FromLeaf; feedback piggybacked by the peer updates ToLeaf.  ACKs do
+    // not carry CONGA feedback in the paper/ns-3 state machine.
+    if (directly_connected && pkt.type() == ROCE) {
+        RocePacket& data = (RocePacket&)pkt;
+        if (data.lbtag() != UINT32_MAX && data.src() != UINT32_MAX) {
+            const uint32_t source_leaf = _ft->HOST_POD_SWITCH(data.src());
+            CongaPathInfo& learned =
+                _conga_from_leaf[source_leaf][data.lbtag()];
+            const bool changed = learned.metric != data.conga_metric();
+            learned.metric = data.conga_metric();
+            learned.updated = eventlist().now();
+            learned.dirty = learned.dirty || changed;
+            if (data.has_conga_feedback())
+                _conga_to_leaf[source_leaf][data.conga_feedback_path()] =
+                    CongaPathInfo(data.conga_feedback_metric(), eventlist().now());
+        }
+    }
     if (_sglb_ecn_mode != SGLB_ECN_OFF && directly_connected &&
         pkt.type() == ROCEACK) {
         RoceAck& ack = (RoceAck&)pkt;
@@ -4605,7 +4833,130 @@ Route* FatTreeSwitch::getNextHop(Packet& pkt, BaseQueue* ingress_port){
             case NIX:
                 abort();
             case ECMP:
-                ecmp_choice = pathid_ecmp_choice(pkt, available_hops->size(), (*available_hops)[0]->getDirection());
+                // CONGA is a source-leaf mechanism.  Decide its flowlet here,
+                // after host-link serialization, so the decision observes the
+                // local DRE state accumulated by earlier arrivals at this leaf.
+                if (_type == TOR &&
+                    (*available_hops)[0]->getDirection() == UP &&
+                    pkt.type() == ROCE &&
+                    ((RocePacket&)pkt).lbtag() != UINT32_MAX) {
+                    RocePacket& data = (RocePacket&)pkt;
+                    const simtime_picosec now = eventlist().now();
+                    const simtime_picosec flowlet_gap = timeFromUs(500.0);
+                    FlowletInfo* flowlet = NULL;
+                    unordered_map<uint32_t, FlowletInfo*>::iterator flowlet_it =
+                        _conga_flowlet_maps.find(pkt.flow_id());
+                    if (flowlet_it != _conga_flowlet_maps.end())
+                        flowlet = flowlet_it->second;
+                    if (flowlet && now - flowlet->_last < flowlet_gap) {
+                        ecmp_choice = flowlet->_egress % available_hops->size();
+                        flowlet->_last = now;
+                    } else {
+                        std::vector<uint32_t> scores(available_hops->size(), 0);
+                        const simtime_picosec period = timeFromUs(32.0);
+                        const simtime_picosec tau = timeFromUs(160.0);
+                        for (uint32_t i = 0; i < available_hops->size(); ++i) {
+                            Route* route = (*available_hops)[i]->getEgressPort();
+                            BaseQueue* queue = route && route->size() ?
+                                dynamic_cast<BaseQueue*>(route->at(0)) : NULL;
+                            uint32_t local = 0;
+                            if (queue) {
+                                CongaDreState& state = _conga_dre[queue];
+                                if (!state.last_decay)
+                                    state.last_decay = now;
+                                if (now > state.last_decay) {
+                                    const uint64_t periods = (now - state.last_decay) / period;
+                                    if (periods) {
+                                        state.bytes = conga_decay_dre(state.bytes, periods);
+                                        state.last_decay += periods * period;
+                                    }
+                                }
+                                local = conga_quantize_dre(
+                                    state.bytes, queue->bitrate(), tau, 3);
+                            }
+                            uint32_t remote = 0;
+                            unordered_map<uint32_t,
+                                unordered_map<uint32_t,CongaPathInfo> >::iterator
+                                leaf_it = _conga_to_leaf.find(destination_leaf);
+                            if (leaf_it != _conga_to_leaf.end()) {
+                                unordered_map<uint32_t,CongaPathInfo>::iterator
+                                    path_it = leaf_it->second.find(i);
+                                if (path_it != leaf_it->second.end()) {
+                                    const simtime_picosec age =
+                                        eventlist().now() - path_it->second.updated;
+                                    remote = age > timeFromMs(10.0) ?
+                                        0 : path_it->second.metric;
+                                }
+                            }
+                            scores[i] = std::max(local, remote);
+                        }
+                        const uint32_t preferred = flowlet ? flowlet->_egress : UINT32_MAX;
+                        uint32_t tie = (uint32_t)random();
+                        ecmp_choice = conga_choose_uplink(scores, preferred, tie);
+                        if (getenv("HTSIM_CONGA_DIAG")) {
+                            cerr << "CongaDecision time_ps=" << now
+                                 << " leaf=" << _id
+                                 << " flow=" << pkt.flow_id()
+                                 << " dst_leaf=" << destination_leaf
+                                 << " scores=";
+                            for (uint32_t i = 0; i < scores.size(); ++i) {
+                                if (i) cerr << '/';
+                                cerr << scores[i];
+                            }
+                            cerr << " selected=" << ecmp_choice
+                                 << " preferred=" << preferred << endl;
+                        }
+                        if (flowlet) {
+                            flowlet->_egress = ecmp_choice;
+                            flowlet->_last = now;
+                        } else {
+                            _conga_flowlet_maps[pkt.flow_id()] =
+                                new FlowletInfo(ecmp_choice, now);
+                        }
+                    }
+                    // The feedback label must identify the source-leaf uplink
+                    // that was actually selected, not the endpoint's stale
+                    // preliminary choice.
+                    pkt.set_pathid(ecmp_choice);
+                    data.set_lbtag(ecmp_choice);
+                    // Uniformly select one learned reverse-path estimate for
+                    // piggyback, as ns-3 CongaRouting::RouteInput does.
+                    unordered_map<uint32_t,
+                        unordered_map<uint32_t,CongaPathInfo> >::iterator fb_leaf =
+                        _conga_from_leaf.find(destination_leaf);
+                    if (fb_leaf != _conga_from_leaf.end() &&
+                        !fb_leaf->second.empty()) {
+                        for (unordered_map<uint32_t,CongaPathInfo>::iterator it =
+                                 fb_leaf->second.begin(); it != fb_leaf->second.end();) {
+                            if (eventlist().now() - it->second.updated > timeFromMs(10.0))
+                                it = fb_leaf->second.erase(it);
+                            else
+                                ++it;
+                        }
+                    }
+                    if (fb_leaf != _conga_from_leaf.end() &&
+                        !fb_leaf->second.empty()) {
+                        uint32_t& cursor =
+                            _conga_feedback_cursor[destination_leaf];
+                        for (uint32_t tries = 0;
+                             tries < fb_leaf->second.size(); ++tries) {
+                            unordered_map<uint32_t,CongaPathInfo>::iterator fb =
+                                fb_leaf->second.begin();
+                            std::advance(fb, cursor % fb_leaf->second.size());
+                            cursor++;
+                            if (fb->second.dirty) {
+                                data.set_conga_feedback(fb->first,
+                                    fb->second.metric);
+                                fb->second.dirty = false;
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    ecmp_choice = pathid_ecmp_choice(
+                        pkt, available_hops->size(),
+                        (*available_hops)[0]->getDirection());
+                }
                 ecmp_choice = nmrc_maybe_reroute(
                     pkt, available_hops, ecmp_choice);
                 break;

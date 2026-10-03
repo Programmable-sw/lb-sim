@@ -51,7 +51,7 @@ def main():
             assert spec["variant"] == "natural_cumulative"
             assert option_value(command, "-roce_transport_semantics") == "legacy"
             assert option_value(command, "-roce_trim_recovery") == "cumulative"
-            assert option_value(command, "-cc") == "dcqcn_variant"
+            assert option_value(command, "-cc") == "dctcp_variant"
             assert option_value(command, "-roce_rx_mode") == "sp"
             assert option_value(command, "-queue_type") == "composite_ecn_lb"
             if spec["scheme"] == "netaware":
@@ -68,7 +68,7 @@ def main():
     legacy_stdout = (
         "RoceTransportConfig semantics=legacy awnd=legacy "
         "exact_trim_attempt_id=off recovery_reserve_bytes=0\n"
-        "FinalCcMrcConfig dcqcn_variant_inflate=natural "
+        "FinalCcMrcConfig dctcp_variant_inflate=natural "
         "mrc_ecn_trim_penalty=mode_uniform "
         "roce_trim_recovery=cumulative\n"
     )

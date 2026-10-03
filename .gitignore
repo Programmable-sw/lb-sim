@@ -37,6 +37,8 @@ idmap.txt
 # Experiment results stay local.
 /experiments/*/output*/
 /experiments/*/.root_owned_output_old/
+/output/
+/cleanup-archives/
 
 # Experiment Python sources are never hidden by a blanket rule. Canonical
 # runners are tracked on main; historical-only runners live on archive refs.

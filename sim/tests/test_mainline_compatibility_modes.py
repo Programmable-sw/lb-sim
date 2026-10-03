@@ -15,7 +15,7 @@ def run(traffic, output, scheme, extra_args=()):
         "-nodes", "256", "-conns", "0", "-tiers", "2",
         "-lb", scheme, "-queue_type", "composite_ecn_lb",
         "-host_queue_type", "prio", "-roce_rx_mode", "sp",
-        "-cc", "dcqcn_variant", "-end", "1",
+        "-cc", "dctcp_variant", "-end", "1",
         "-linkspeed", "400000", "-paths", "64", *extra_args,
     ]
     return subprocess.run(
