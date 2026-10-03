@@ -11,6 +11,7 @@ uint32_t Settings::ip_to_node_id(Ipv4Address ip) {
 
 /* others */
 uint32_t Settings::lb_mode = 0;
+uint64_t Settings::hybrid_collective_bytes = 0;
 
 std::map<uint32_t, uint32_t> Settings::hostIp2IdMap;
 std::map<uint32_t, uint32_t> Settings::hostId2IpMap;
@@ -21,6 +22,11 @@ uint32_t Settings::host_num = 0;
 uint32_t Settings::switch_num = 0;
 uint64_t Settings::cnt_finished_flows = 0;
 uint32_t Settings::packet_payload = 1000;
+uint32_t Settings::dtor_feedback_mode = 1;
+uint32_t Settings::dtor_feedback_pkts = 100;
+double Settings::dtor_feedback_min_us = 8.0;
+double Settings::dtor_feedback_max_us = 20.0;
+uint32_t Settings::dtor_min_good_paths = 16;
 
 uint32_t Settings::dropped_pkt_sw_ingress = 0;
 uint32_t Settings::dropped_pkt_sw_egress = 0;

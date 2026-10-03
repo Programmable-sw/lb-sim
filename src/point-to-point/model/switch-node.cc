@@ -14,6 +14,7 @@
 #include "ns3/settings.h"
 #include "ns3/uinteger.h"
 #include "ppp-header.h"
+#include "qbb-header.h"
 #include "qbb-net-device.h"
 #include "cn-header.h"
 
@@ -250,41 +251,69 @@ bool SwitchNode::SwitchReceiveFromDevice(Ptr<NetDevice> device, Ptr<Packet> pack
             BitmapSprayTag tag;
             if (packet->PeekPacketTag(tag)) {
 
+                uint32_t source_key = ch.sip;
+                auto src_tor = Settings::hostIp2SwitchId.find(ch.sip);
+                if (src_tor != Settings::hostIp2SwitchId.end()) {
+                    source_key = src_tor->second;
+                }
+
                 // ===== 1. 初始化 =====
-                if (m_dtor_path_states.find(ch.sip) == m_dtor_path_states.end()) {
-                    m_dtor_path_states[ch.sip].set(); 
-                    m_dtor_total_pkt_cnt[ch.sip] = 0; // 初始化全局包计数器
+                if (m_dtor_path_states.find(source_key) == m_dtor_path_states.end()) {
+                    m_dtor_path_states[source_key].set();
+                    m_dtor_total_pkt_cnt[source_key] = 0;
+                    if (Settings::dtor_feedback_mode != 0) {
+                        m_last_feedback_time[source_key] = Simulator::Now();
+                    }
                 }
 
                 uint32_t path_index = tag.GetPathId() % 256;
                 uint8_t ecn = ch.GetIpv4EcnBits(); 
 
-                // ===== 2. 状态更新与 Epoch 计数 =====
-                m_dtor_total_pkt_cnt[ch.sip]++; // 收包累加
+                // ===== 2. 状态更新与周期计数 =====
+                m_dtor_total_pkt_cnt[source_key]++;
                 
                 if (ecn != 0) {
-                    m_dtor_path_states[ch.sip].reset(path_index);
+                    m_dtor_path_states[source_key].reset(path_index);
                 } else {
-                    m_dtor_path_states[ch.sip].set(path_index);
+                    m_dtor_path_states[source_key].set(path_index);
                 }
 
-                // ===== 3. Epoch 全局重置机制 =====
-                // 假设网络以 100Gbps 运行，MTU 1000B，1000个包大约是 80us 的数据量。
-                // 调整 EPOCH_THRESHOLD 改变重置周期
-                const uint32_t EPOCH_THRESHOLD = 1000; 
-                if (m_dtor_total_pkt_cnt[ch.sip] >= EPOCH_THRESHOLD) {
-                    m_dtor_path_states[ch.sip].set(); // 周期一到，直接全量置 1 刷新！
-                    m_dtor_total_pkt_cnt[ch.sip] = 0;
+                // ===== 3. 反馈触发 =====
+                bool should_feedback = false;
+                if (Settings::dtor_feedback_mode == 0) {
+                    const uint32_t EPOCH_THRESHOLD = 1000;
+                    if (m_dtor_total_pkt_cnt[source_key] >= EPOCH_THRESHOLD) {
+                        m_dtor_path_states[source_key].set();
+                        m_dtor_total_pkt_cnt[source_key] = 0;
+                    }
+                    should_feedback = (Simulator::Now() - m_last_feedback_time[source_key] > MicroSeconds(20));
+                } else {
+                    Time elapsed = Simulator::Now() - m_last_feedback_time[source_key];
+                    bool packet_trigger = m_dtor_total_pkt_cnt[source_key] >= Settings::dtor_feedback_pkts &&
+                                          elapsed >= MicroSeconds(Settings::dtor_feedback_min_us);
+                    bool time_trigger = m_dtor_total_pkt_cnt[source_key] > 0 &&
+                                        elapsed >= MicroSeconds(Settings::dtor_feedback_max_us);
+                    should_feedback = packet_trigger || time_trigger;
                 }
 
-                // ===== 4. 定时发送反馈 =====
-                if (Simulator::Now() - m_last_feedback_time[ch.sip] > MicroSeconds(20)) {
-                    m_last_feedback_time[ch.sip] = Simulator::Now();
+                // ===== 4. 发送反馈 =====
+                if (should_feedback) {
+                    m_last_feedback_time[source_key] = Simulator::Now();
                     
-                    Ptr<Packet> feedback_pkt = Create<Packet>(20); 
+                    Ptr<Packet> feedback_pkt = Create<Packet>(0);
                     BitmapFeedbackTag f_tag;
-                    f_tag.m_bitmap = m_dtor_path_states[ch.sip];
+                    f_tag.m_bitmap = m_dtor_path_states[source_key];
                     feedback_pkt->AddPacketTag(f_tag);
+
+                    qbbHeader seqh;
+                    seqh.SetSeq(0);
+                    seqh.SetPG(ch.udp.pg);
+                    seqh.SetSport(ch.udp.dport);
+                    seqh.SetDport(ch.udp.sport);
+                    seqh.SetIntHeader(ch.udp.ih);
+                    seqh.SetIrnNack(0);
+                    seqh.SetIrnNackSize(0);
+                    feedback_pkt->AddHeader(seqh);
 
                     CustomHeader f_ch;
                     f_ch.sip = ch.dip; 
@@ -292,6 +321,12 @@ bool SwitchNode::SwitchReceiveFromDevice(Ptr<NetDevice> device, Ptr<Packet> pack
                     f_ch.l3Prot = 0xFA; 
                     f_ch.ack.sport = ch.udp.dport;
                     f_ch.ack.dport = ch.udp.sport; 
+                    f_ch.ack.pg = ch.udp.pg;
+                    f_ch.ack.seq = 0;
+                    f_ch.ack.flags = 0;
+                    f_ch.ack.irnNack = 0;
+                    f_ch.ack.irnNackSize = 0;
+                    f_ch.ack.ih = ch.udp.ih;
 
                     Ipv4Header ipHeader;
                     ipHeader.SetSource(Ipv4Address(ch.dip));
@@ -306,6 +341,11 @@ bool SwitchNode::SwitchReceiveFromDevice(Ptr<NetDevice> device, Ptr<Packet> pack
                     feedback_pkt->AddHeader(ppp);
 
                     SendToDev(feedback_pkt, f_ch);
+
+                    if (Settings::dtor_feedback_mode != 0) {
+                        m_dtor_path_states[source_key].set();
+                        m_dtor_total_pkt_cnt[source_key] = 0;
+                    }
                 }
             }
         }
@@ -321,7 +361,9 @@ void SwitchNode::SendToDev(Ptr<Packet> p, CustomHeader &ch) {
      */
 
     // Conga
-    if (Settings::lb_mode == 3) {
+    PaperLbTag paperTag;
+    bool forceEcmp = p->PeekPacketTag(paperTag) && paperTag.lb == 0;
+    if (Settings::lb_mode == 3 && !forceEcmp) {
         m_mmu->m_congaRouting.RouteInput(p, ch);
         return;
     }
@@ -346,13 +388,27 @@ void SwitchNode::SendToDevContinue(Ptr<Packet> p, CustomHeader &ch) {
     
     if (idx >= 0) {
         NS_ASSERT_MSG(m_devices[idx]->IsLinkUp(), "The routing table look up should return link that is up");
+
+        // Short flows deliberately use ECMP in the hybrid experiment, but their bytes still
+        // consume the links measured by CONGA's DRE. Account them on source-ToR and spine
+        // inter-switch outputs, matching the links RouteInput measures for CONGA traffic.
+        PaperLbTag paperTag;
+        bool forceEcmp = p->PeekPacketTag(paperTag) && paperTag.lb == 0;
+        if (Settings::lb_mode == 3 && forceEcmp && ch.l3Prot == 0x11) {
+            std::map<uint32_t, uint32_t>::const_iterator destination =
+                Settings::hostIp2SwitchId.find(ch.dip);
+            if (destination != Settings::hostIp2SwitchId.end() && m_id != destination->second) {
+                m_mmu->m_congaRouting.AccountBytes(p->GetSize(), idx);
+            }
+        }
         
         // 恢复原有的 qIndex 优先级判断逻辑
         uint32_t qIndex;
         if (ch.l3Prot == 0xFF || ch.l3Prot == 0xFE ||
             (m_ackHighPrio &&
              (ch.l3Prot == 0xFD ||
-              ch.l3Prot == 0xFC))) {  // QCN or PFC or ACK/NACK 以及的 GCN/LSN (0xFD)
+              ch.l3Prot == 0xFC ||
+              ch.l3Prot == 0xFA))) {  // QCN, PFC, ACK/NACK, or bitmap feedback
             qIndex = 0;               // 最高优先级队列
         } else {
             qIndex = (ch.l3Prot == 0x06 ? 1 : ch.udp.pg);  // 其他协议走普通队列
@@ -390,9 +446,12 @@ int SwitchNode::GetOutDev(Ptr<Packet> p, CustomHeader &ch) {
     // entry found
     const auto &nexthops = entry->second;
     bool control_pkt =
-        (ch.l3Prot == 0xFF || ch.l3Prot == 0xFE || ch.l3Prot == 0xFD || ch.l3Prot == 0xFC);
+        (ch.l3Prot == 0xFF || ch.l3Prot == 0xFE || ch.l3Prot == 0xFD ||
+         ch.l3Prot == 0xFC || ch.l3Prot == 0xFA);
 
-    if (Settings::lb_mode == 0 || control_pkt) {  
+    PaperLbTag paperTag;
+    bool forceEcmp = p->PeekPacketTag(paperTag) && paperTag.lb == 0;
+    if (Settings::lb_mode == 0 || control_pkt || forceEcmp) {
         return DoLbFlowECMP(p, ch, nexthops);     
     }
 
@@ -407,6 +466,7 @@ int SwitchNode::GetOutDev(Ptr<Packet> p, CustomHeader &ch) {
             return DoLbConWeave(p, ch, nexthops); /** DUMMY: Do ECMP */
         case 10:
             return DoLbGlb(p, ch, nexthops);
+        case 14: // MP-RDMA VP is the UDP source port, hashed by ECMP.
         case 11:
             return DoLbReps(p, ch, nexthops);   /* REPS, do ECMP */
         case 13:

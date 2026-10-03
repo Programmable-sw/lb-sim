@@ -39,6 +39,7 @@ def build(bld):
     headers = bld(features='ns3header')
     headers.module = 'point-to-point'
     headers.source = [
+        'model/paper-lb-state.h',
         'model/point-to-point-net-device.h',
         'model/point-to-point-channel.h',
         'model/point-to-point-remote-channel.h',
@@ -60,6 +61,7 @@ def build(bld):
         'model/settings.h',
 		'helper/sim-setting.h',
 		'model/flow-stat-tag.h',
+		'model/conga-flow-key.h',
 		'model/conga-routing.h',
         'model/letflow-routing.h',
         'model/conweave-routing.h',

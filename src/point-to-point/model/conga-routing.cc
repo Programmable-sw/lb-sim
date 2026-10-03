@@ -30,6 +30,8 @@
 #include "ns3/packet.h"
 #include "ns3/settings.h"
 #include "ns3/simulator.h"
+#include <cstdlib>
+#include <iostream>
 
 NS_LOG_COMPONENT_DEFINE("CongaRouting");
 
@@ -95,9 +97,9 @@ CongaRouting::CongaRouting() {
     m_alpha = 0.2;
 }
 
-// it defines flowlet's 64bit key (order does not matter)
-uint64_t CongaRouting::GetQpKey(uint32_t dip, uint16_t sport, uint16_t dport, uint16_t pg) {
-    return ((uint64_t)dip << 32) | ((uint64_t)sport << 16) | (uint64_t)pg | (uint64_t)dport;
+CongaFlowKey CongaRouting::GetQpKey(uint32_t sip, uint32_t dip, uint16_t sport, uint16_t dport,
+                                    uint16_t pg) {
+    return CongaFlowKey(sip, dip, sport, dport, pg);
 }
 
 TypeId CongaRouting::GetTypeId(void) {
@@ -185,7 +187,7 @@ void CongaRouting::RouteInput(Ptr<Packet> p, CustomHeader ch) {
     assert(srcToRId != dstToRId && "Should not be in the same pod");
 
     // get QpKey to find flowlet
-    uint64_t qpkey = GetQpKey(ch.dip, ch.udp.sport, ch.udp.dport, ch.udp.pg);
+    CongaFlowKey qpkey = GetQpKey(ch.sip, ch.dip, ch.udp.sport, ch.udp.dport, ch.udp.pg);
 
     // get CongaTag from packet
     CongaTag congaTag;
@@ -251,7 +253,7 @@ void CongaRouting::RouteInput(Ptr<Packet> p, CustomHeader ch) {
 
                 /*---- Flowlet Timeout ----*/
                 // NS_LOG_FUNCTION("Flowlet expires, calculate the new port");
-                selectedPath = GetBestPath(dstToRId, 4);
+                selectedPath = GetBestPath(dstToRId, 4, flowlet->_PathId);
                 CongaRouting::nFlowletTimeout++;
 
                 // update flowlet info
@@ -374,7 +376,8 @@ void CongaRouting::RouteInput(Ptr<Packet> p, CustomHeader ch) {
 }
 
 // minimize the maximum link utilization
-uint32_t CongaRouting::GetBestPath(uint32_t dstToRId, uint32_t nSample) {
+uint32_t CongaRouting::GetBestPath(uint32_t dstToRId, uint32_t nSample,
+                                  uint32_t preferredPath) {
     auto pathItr = m_congaRoutingTable.find(dstToRId);
     assert(pathItr != m_congaRoutingTable.end() && "Cannot find dstToRId from ToLeafTable");
     std::set<uint32_t>::iterator innerPathItr = pathItr->second.begin();
@@ -391,6 +394,10 @@ uint32_t CongaRouting::GetBestPath(uint32_t dstToRId, uint32_t nSample) {
 
     // get min-max path
     std::vector<uint32_t> candidatePaths;
+    std::vector<uint32_t> sampledPaths;
+    std::vector<uint32_t> sampledLocal;
+    std::vector<uint32_t> sampledRemote;
+    std::vector<uint32_t> sampledScore;
     uint32_t minCongestion = CONGA_NULL;
     for (uint32_t i = 0; i < nSample; i++) {
         // get info of path
@@ -416,6 +423,10 @@ uint32_t CongaRouting::GetBestPath(uint32_t dstToRId, uint32_t nSample) {
 
         // get maximum of congestion (local, remote)
         uint32_t CurrCongestion = std::max(localCongestion, remoteCongestion);
+        sampledPaths.push_back(pathId);
+        sampledLocal.push_back(localCongestion);
+        sampledRemote.push_back(remoteCongestion);
+        sampledScore.push_back(CurrCongestion);
 
         // filter the best path
         if (minCongestion > CurrCongestion) {
@@ -428,12 +439,77 @@ uint32_t CongaRouting::GetBestPath(uint32_t dstToRId, uint32_t nSample) {
         std::advance(innerPathItr, 1);
     }
     assert(candidatePaths.size() > 0 && "candidatePaths has no entry");
-    return candidatePaths[rand() % candidatePaths.size()];  // randomly choose the best path
+    if (preferredPath != CONGA_NULL &&
+        std::find(candidatePaths.begin(), candidatePaths.end(), preferredPath) != candidatePaths.end()) {
+        if (std::getenv("NS3_CONGA_DIAG")) {
+            std::cerr << "Ns3CongaDecision time_ns=" << Simulator::Now().GetNanoSeconds()
+                      << " switch=" << m_switch_id
+                      << " dst_leaf=" << dstToRId
+                      << " preferred=" << preferredPath
+                      << " selected=" << preferredPath
+                      << " paths=";
+            for (size_t i = 0; i < sampledPaths.size(); ++i) {
+                if (i) std::cerr << '/';
+                std::cerr << sampledPaths[i];
+            }
+            std::cerr << " local=";
+            for (size_t i = 0; i < sampledLocal.size(); ++i) {
+                if (i) std::cerr << '/';
+                std::cerr << sampledLocal[i];
+            }
+            std::cerr << " remote=";
+            for (size_t i = 0; i < sampledRemote.size(); ++i) {
+                if (i) std::cerr << '/';
+                std::cerr << sampledRemote[i];
+            }
+            std::cerr << " score=";
+            for (size_t i = 0; i < sampledScore.size(); ++i) {
+                if (i) std::cerr << '/';
+                std::cerr << sampledScore[i];
+            }
+            std::cerr << std::endl;
+        }
+        return preferredPath;
+    }
+    uint32_t selected = candidatePaths[rand() % candidatePaths.size()];
+    if (std::getenv("NS3_CONGA_DIAG")) {
+        std::cerr << "Ns3CongaDecision time_ns=" << Simulator::Now().GetNanoSeconds()
+                  << " switch=" << m_switch_id
+                  << " dst_leaf=" << dstToRId
+                  << " preferred=" << preferredPath
+                  << " selected=" << selected
+                  << " paths=";
+        for (size_t i = 0; i < sampledPaths.size(); ++i) {
+            if (i) std::cerr << '/';
+            std::cerr << sampledPaths[i];
+        }
+        std::cerr << " local=";
+        for (size_t i = 0; i < sampledLocal.size(); ++i) {
+            if (i) std::cerr << '/';
+            std::cerr << sampledLocal[i];
+        }
+        std::cerr << " remote=";
+        for (size_t i = 0; i < sampledRemote.size(); ++i) {
+            if (i) std::cerr << '/';
+            std::cerr << sampledRemote[i];
+        }
+        std::cerr << " score=";
+        for (size_t i = 0; i < sampledScore.size(); ++i) {
+            if (i) std::cerr << '/';
+            std::cerr << sampledScore[i];
+        }
+        std::cerr << std::endl;
+    }
+    return selected;
 }
 
 uint32_t CongaRouting::UpdateLocalDre(Ptr<Packet> p, CustomHeader ch, uint32_t outPort) {
+    return AccountBytes(p->GetSize(), outPort);
+}
+
+uint32_t CongaRouting::AccountBytes(uint32_t bytes, uint32_t outPort) {
     uint32_t X = m_DreMap[outPort];
-    uint32_t newX = X + p->GetSize();
+    uint32_t newX = X + bytes;
     // NS_LOG_FUNCTION("Old X" << X << "New X" << newX << "outPort" << outPort << "Switch" <<
     // m_switch_id << Simulator::Now());
     m_DreMap[outPort] = newX;
@@ -458,7 +534,7 @@ uint32_t CongaRouting::QuantizingX(uint32_t outPort, uint32_t X) {
     if (quantX > 3) {
         NS_LOG_FUNCTION("X" << X << "Ratio" << ratio << "Bits" << quantX << Simulator::Now());
     }
-    return quantX;
+    return CongaSaturateMetric(quantX, m_quantizeBit);
 }
 
 void CongaRouting::SetConstants(Time dreTime, Time agingTime, Time flowletTimeout,

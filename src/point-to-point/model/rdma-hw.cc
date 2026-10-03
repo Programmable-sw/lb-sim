@@ -6,6 +6,7 @@
 #include <ns3/udp-header.h>
 
 #include <climits>
+#include <cmath>
 
 #include "cn-header.h"
 #include "flow-stat-tag.h"
@@ -215,6 +216,13 @@ void RdmaHw::AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Addre
     qp->SetVarWin(m_var_win);
     qp->SetFlowId(flow_id);
     qp->SetTimeout(m_waitAckTimeout);
+    qp->paperCc = m_cc_mode == 14;
+    qp->paperLb = (Settings::hybrid_collective_bytes && size != Settings::hybrid_collective_bytes)
+        ? 0 : Settings::lb_mode;
+    qp->paperMtu = m_mtu;
+    qp->paperCwnd = std::max(1.0, double(win) / m_mtu);
+    qp->paperMpr.initial = uint32_t(qp->paperCwnd);
+
 
     if (m_irn) {
         qp->irn.m_enabled = m_irn;
@@ -318,7 +326,9 @@ int RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader &ch) {
     uint32_t payload_size = p->GetSize() - ch.GetSerializedSize();
 
     // 从 Tag 提取真实源端口
-    uint16_t original_sport = ch.udp.sport;     // 仅在修改 sport 路由的模式才修改 original_sport 获取
+    PaperLbTag paperTag;
+    bool paperPacket = p->PeekPacketTag(paperTag);
+    uint16_t original_sport = paperPacket ? paperTag.originalPort : ch.udp.sport;     // 仅在修改 sport 路由的模式才修改 original_sport 获取
     if (Settings::lb_mode == 11) {
         RepsTag tag;
         if (p->PeekPacketTag(tag)) {
@@ -436,6 +446,10 @@ int RdmaHw::ReceiveUdp(Ptr<Packet> p, CustomHeader &ch) {
             newp->AddPacketTag(ackTag); // Packet Tags | PPP Header | IPv4 Header | qbb Header
         }
 
+        if (paperPacket) {
+            paperTag.ecn = ecnbits != 0;
+            newp->AddPacketTag(paperTag);
+        }
         // send
         uint32_t nic_idx = GetNicIdxOfRxQp(rxQp);
         m_nic[nic_idx].dev->RdmaEnqueueHighPrioQ(newp);
@@ -521,6 +535,48 @@ int RdmaHw::ReceiveAck(Ptr<Packet> p, CustomHeader &ch) {
             exit(1);
         }
     }
+
+    if (qp->paperCc) {
+        PaperLbTag feedback;
+        if (p->PeekPacketTag(feedback) && qp->paperAcked.insert(feedback.seq).second) {
+            qp->paperEcnAcks += feedback.ecn != 0;
+            qp->paperOutstanding.erase(feedback.seq);
+            qp->paperCwnd = std::max(1.0, qp->paperCwnd +
+                (feedback.ecn ? -0.5 : 1.0 / qp->paperCwnd));
+            if (qp->paperLb == 11)
+                qp->paperReps.Ack(feedback.ev, feedback.ecn,
+                    Simulator::Now().GetNanoSeconds(), unsigned(qp->paperCwnd));
+            if (qp->paperLb == 14) {
+                qp->paperMpr.Ack(feedback.ev, feedback.seq / m_mtu,
+                    feedback.retransmitted, 32, unsigned(std::max(0.0, floor(qp->paperCwnd -
+                        qp->paperOutstanding.size() - qp->paperMpr.credits.size()))));
+                qp->paperBurstAt = Simulator::Now().GetNanoSeconds() + qp->m_baseRtt;
+                if (qp->paperBurst.IsRunning()) qp->paperBurst.Cancel();
+                uint32_t idx = GetNicIdxOfQp(qp);
+                qp->paperBurst = Simulator::Schedule(NanoSeconds(qp->m_baseRtt),
+                    &QbbNetDevice::TriggerTransmit, m_nic[idx].dev);
+            }
+        }
+    }
+    // ================= START: REPS 回收逻辑 =================
+    // REPS is load-balancing state, not a DCTCP-only congestion-control hook.
+    // Recycle EVs from ACK-like feedback that does not carry congestion.
+    if (!qp->paperCc && Settings::lb_mode == 11 && !cnp) {
+        RepsTag ackTag;
+        if (p->PeekPacketTag(ackTag)) {
+            uint16_t ev_from_ack = ackTag.m_value;
+
+            if (!qp->reps.isValid[qp->reps.head]) {
+                qp->reps.numValid++;
+            }
+            qp->reps.buffer[qp->reps.head] = ev_from_ack;
+            qp->reps.isValid[qp->reps.head] = true;
+            qp->reps.head = (qp->reps.head + 1) % 8;
+
+            qp->reps.isFreezingMode = false;
+        }
+    }
+    // ================= END: REPS 回收逻辑 =================
 
     uint32_t nic_idx = GetNicIdxOfQp(qp);
     Ptr<QbbNetDevice> dev = m_nic[nic_idx].dev;
@@ -659,11 +715,46 @@ int RdmaHw::ReceiveAck(Ptr<Packet> p, CustomHeader &ch) {
 int RdmaHw::ReceiveBitmap(Ptr<Packet> p, CustomHeader &ch) {
     BitmapFeedbackTag f_tag;
     if (p->PeekPacketTag(f_tag)) {
-        // 遍历本机所有的 QP，把属于这条流（dip 对应反馈包的 sip）的 QP 状态更新
+        uint32_t feedback_tor = 0;
+        bool has_feedback_tor = false;
+        auto tor_it = Settings::hostIp2SwitchId.find(ch.sip);
+        if (tor_it != Settings::hostIp2SwitchId.end()) {
+            feedback_tor = tor_it->second;
+            has_feedback_tor = true;
+        }
+
+        // 遍历本机所有的 QP，把同一目的 ToR/目的主机的 QP 状态更新
         for (auto &it : m_qpMap) {
             Ptr<RdmaQueuePair> qp = it.second;
-            if (qp->dip.Get() == ch.sip) { 
-                qp->m_path_bitmap = f_tag.m_bitmap;
+            bool matched = (qp->dip.Get() == ch.sip);
+            if (!matched && has_feedback_tor) {
+                auto qp_tor = Settings::hostIp2SwitchId.find(qp->dip.Get());
+                matched = (qp_tor != Settings::hostIp2SwitchId.end() &&
+                           qp_tor->second == feedback_tor);
+            }
+
+            if (matched) {
+                if (Settings::dtor_feedback_mode == 0) {
+                    qp->m_path_bitmap = f_tag.m_bitmap;
+                    continue;
+                }
+
+                std::bitset<256> old_bitmap = qp->m_path_bitmap;
+                std::bitset<256> fresh_bitmap = f_tag.m_bitmap;
+                std::bitset<256> confirmed = old_bitmap & fresh_bitmap;
+                std::bitset<256> gray = (~old_bitmap) & fresh_bitmap;
+                std::bitset<256> merged = confirmed;
+
+                if (confirmed.count() < Settings::dtor_min_good_paths) {
+                    merged |= gray;
+                }
+                if (!merged.any()) {
+                    merged = fresh_bitmap.any() ? fresh_bitmap : old_bitmap;
+                }
+                if (!merged.any()) {
+                    merged.set();
+                }
+                qp->m_path_bitmap = merged;
             }
         }
     }
@@ -708,6 +799,20 @@ int RdmaHw::Receive(Ptr<Packet> p, CustomHeader &ch) {
  * 6: NACK but functionality is ACK (indicating all packets are received)
  */
 int RdmaHw::ReceiverCheckSeq(uint32_t seq, Ptr<RdmaRxQueuePair> q, uint32_t size, bool &cnp) {
+    if (m_cc_mode == 14) {
+        // Common OOO-capable receiver: acknowledge every data packet. The exact
+        // delivered sequence and CE are echoed independently of cumulative ACK.
+        cnp = false;
+        if (seq >= q->ReceiverNextExpectedSeq) q->m_irn_sack_.sack(seq, size);
+        uint32_t begin, length;
+        while (q->m_irn_sack_.peekFrontBlock(&begin, &length) &&
+               begin <= q->ReceiverNextExpectedSeq) {
+            q->ReceiverNextExpectedSeq = std::max(q->ReceiverNextExpectedSeq, begin + length);
+            q->m_irn_sack_.discardUpTo(q->ReceiverNextExpectedSeq);
+        }
+        return 6;
+    }
+
     uint32_t expected = q->ReceiverNextExpectedSeq;
     // 【分支 1】：按序到达，或刚好填补当前空洞
     if (seq == expected || (seq < expected && seq + size >= expected)) {
@@ -926,7 +1031,7 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp) {
     udpHeader.SetDestinationPort(qp->dport);
     // sport 封装逻辑修改
     // ================= START: REPS 发包逻辑 =================
-    if (Settings::lb_mode == 11) {
+    if (!qp->paperCc && Settings::lb_mode == 11) {
         uint16_t ev;
         if (qp->reps.numValid > 0 && !qp->reps.isFreezingMode) {
             // 1. 正常模式，有优质路径
@@ -955,6 +1060,39 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp) {
         udpHeader.SetSourcePort(qp->sport); // 原有默认逻辑
     }
     // ================= END: REPS 发包逻辑 =================
+    if (qp->paperCc) {
+        PaperLbTag tag;
+        ++qp->paperSends;
+        tag.lb = qp->paperLb; tag.originalPort = qp->sport;
+        tag.seq = seq; tag.retransmitted = is_retransmission;
+        uint16_t ev = qp->sport;
+        if (qp->paperLb == 11 && qp->paperReps.count) ++qp->paperCacheSends;
+        if (qp->paperLb == 11)
+            ev = qp->paperReps.Select(rand() % 65536, Simulator::Now().GetNanoSeconds());
+        if (qp->paperLb == 14) {
+            auto old = qp->paperOutstanding.find(seq);
+            if (is_retransmission && old != qp->paperOutstanding.end()) ev = old->second;
+            else {
+                ev = qp->paperMpr.Select(rand() % 65536);
+                uint64_t now = Simulator::Now().GetNanoSeconds();
+                if (qp->paperMpr.ackSeen && now >= qp->paperMpr.nextProbe) {
+                    qp->paperMpr.nextProbe = now + qp->m_baseRtt;
+                    if (rand() % 100 == 0) ev = rand() % 65536;
+                }
+                if (qp->paperMpr.initial == 0 && qp->paperMpr.credits.empty()) {
+                    qp->paperBurstAt = Simulator::Now().GetNanoSeconds() + qp->m_baseRtt;
+                    if (qp->paperBurst.IsRunning()) qp->paperBurst.Cancel();
+                    uint32_t idx = GetNicIdxOfQp(qp);
+                    qp->paperBurst = Simulator::Schedule(NanoSeconds(qp->m_baseRtt),
+                        &QbbNetDevice::TriggerTransmit, m_nic[idx].dev);
+                }
+            }
+        }
+        tag.ev = ev;
+        qp->paperOutstanding[seq] = ev;
+        udpHeader.SetSourcePort(ev);
+        p->AddPacketTag(tag);
+    }
     p->AddHeader(udpHeader);
     // add ipv4 header
     Ipv4Header ipHeader;
@@ -1078,7 +1216,12 @@ void RdmaHw::HandleTimeout(Ptr<RdmaQueuePair> qp, Time rto) {
     Ptr<QbbNetDevice> dev = m_nic[nic_idx].dev;
 
     // IRN: disable timeouts when PFC is enabled to prevent spurious retransmissions
-    if (qp->irn.m_enabled && dev->IsQbbEnabled()) return;
+    if (!qp->paperCc && qp->irn.m_enabled && dev->IsQbbEnabled()) return;
+    if (qp->paperCc) {
+        ++qp->paperRtos;
+        qp->paperCwnd = std::max(1.0, qp->paperCwnd - 1.0);
+        if (qp->paperLb == 11) qp->paperReps.Fail(Simulator::Now().GetNanoSeconds());
+    }
 
     if (acc_timeout_count.find(qp->m_flow_id) == acc_timeout_count.end())
         acc_timeout_count[qp->m_flow_id] = 0;
@@ -1522,28 +1665,6 @@ void RdmaHw::FastReactTimely(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader 
 void RdmaHw::HandleAckDctcp(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader &ch) {
     uint32_t ack_seq = ch.ack.seq;
     uint8_t cnp = (ch.ack.flags >> qbbHeader::FLAG_CNP) & 1;
-
-    // ================= START: REPS 回收逻辑 =================
-    if (Settings::lb_mode == 11) {
-        if (!cnp) {
-            RepsTag ackTag;
-            if (p->PeekPacketTag(ackTag)) {
-                uint16_t ev_from_ack = ackTag.m_value;
-                
-                // 论文算法 1：如果是无效位置被写入，有效数量 +1[cite: 1]
-                if (!qp->reps.isValid[qp->reps.head]) {
-                    qp->reps.numValid++;
-                }
-                qp->reps.buffer[qp->reps.head] = ev_from_ack;
-                qp->reps.isValid[qp->reps.head] = true;
-                qp->reps.head = (qp->reps.head + 1) % 8;
-
-                // 收到健康 ACK 时，解除冻结模式
-                qp->reps.isFreezingMode = false; 
-            }
-        }
-    }
-    // ================= END: REPS 回收逻辑 =================
 
     bool new_batch = false;
 

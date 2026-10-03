@@ -97,6 +97,7 @@ namespace ns3 {
     void RdmaQueuePair::SetTimeout(Time v) { m_timeout = v; }
 
     uint64_t RdmaQueuePair::GetBytesLeft() {
+        if (paperCc && !irn.m_retransmit_queue.empty()) return paperMtu;
         if (irn.m_enabled) {
             uint32_t sack_seq, sack_sz;
             if (irn.m_sack.peekFrontBlock(&sack_seq, &sack_sz)) {
@@ -137,6 +138,12 @@ uint64_t RdmaQueuePair::GetOnTheFly() {
 }
 
 bool RdmaQueuePair::IsWinBound() {
+    if (paperCc) {
+        if (!irn.m_retransmit_queue.empty()) return false;
+        if (paperOutstanding.size() + 1 > paperCwnd) return true;
+        return paperLb == 14 && !paperMpr.initial && paperMpr.credits.empty() &&
+            uint64_t(Simulator::Now().GetNanoSeconds()) < paperBurstAt;
+    }
     uint64_t w = GetWin();
     return w != 0 && GetOnTheFly() >= w;
 }

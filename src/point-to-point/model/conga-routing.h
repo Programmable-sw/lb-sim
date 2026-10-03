@@ -30,6 +30,7 @@
 
 #include "ns3/address.h"
 #include "ns3/callback.h"
+#include "ns3/conga-flow-key.h"
 #include "ns3/event-id.h"
 #include "ns3/net-device.h"
 #include "ns3/object.h"
@@ -100,7 +101,8 @@ class CongaRouting : public Object {
 
     /* static */
     static TypeId GetTypeId(void);
-    static uint64_t GetQpKey(uint32_t dip, uint16_t sport, uint16_t dport, uint16_t pg);              // same as in rdma_hw.cc
+    static CongaFlowKey GetQpKey(uint32_t sip, uint32_t dip, uint16_t sport, uint16_t dport,
+                                 uint16_t pg);
     static uint32_t GetOutPortFromPath(const uint32_t& path, const uint32_t& hopCount);               // decode outPort from path, given a hop's order
     static void SetOutPortToPath(uint32_t& path, const uint32_t& hopCount, const uint32_t& outPort);  // encode outPort to path
     static uint32_t nFlowletTimeout;                                                                  // number of flowlet's timeout
@@ -108,8 +110,10 @@ class CongaRouting : public Object {
     /* main function */
     void RouteInput(Ptr<Packet> p, CustomHeader ch);
     uint32_t UpdateLocalDre(Ptr<Packet> p, CustomHeader ch, uint32_t outPort);
+    uint32_t AccountBytes(uint32_t bytes, uint32_t outPort);
     uint32_t QuantizingX(uint32_t outPort, uint32_t X);  // X is bytes here and we quantizing it to 0 - 2^Q
-    uint32_t GetBestPath(uint32_t dstTorId, uint32_t nSample);
+    uint32_t GetBestPath(uint32_t dstTorId, uint32_t nSample,
+                         uint32_t preferredPath = CONGA_NULL);
     virtual void DoDispose();
 
     /* SET functions */
@@ -159,7 +163,7 @@ class CongaRouting : public Object {
 
     // local
     std::map<uint32_t, uint32_t> m_DreMap;        // outPort -> DRE (at SrcToR)
-    std::map<uint64_t, Flowlet*> m_flowletTable;  // QpKey -> Flowlet (at SrcToR)
+    std::map<CongaFlowKey, Flowlet*> m_flowletTable;  // five-tuple + PG -> Flowlet
 };
 
 }  // namespace ns3

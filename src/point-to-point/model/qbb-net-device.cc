@@ -114,7 +114,7 @@ int RdmaEgressQueue::GetNextQindex(bool paused[]) {
         Ptr<RdmaQueuePair> qp = m_qpGrp->Get((qIndex + m_rrlast) % fcount);
         bool cond1 = !paused[qp->m_pg];
         bool cond_window_allowed =
-            (!qp->IsWinBound() && (!qp->irn.m_enabled || qp->CanIrnTransmit(m_mtu)));
+            (!qp->IsWinBound() && (qp->paperCc || !qp->irn.m_enabled || qp->CanIrnTransmit(m_mtu)));
         bool cond2 = (qp->GetBytesLeft() > 0 && cond_window_allowed);
 
         if (!cond2 && !m_qpGrp->IsQpFinished((qIndex + m_rrlast) % fcount)) {

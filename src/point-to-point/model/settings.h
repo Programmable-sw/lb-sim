@@ -105,6 +105,29 @@ class LastSendTimeTag : public Tag {
  * @brief Global setting parameters
  */
 
+// Simulation-only metadata: data identity is independent of routing entropy.
+class PaperLbTag : public Tag {
+public:
+    uint32_t seq = 0;
+    uint16_t originalPort = 0, ev = 0;
+    uint8_t lb = 0, ecn = 0, retransmitted = 0;
+    static TypeId GetTypeId() {
+        static TypeId tid = TypeId("ns3::PaperLbTag").SetParent<Tag>().AddConstructor<PaperLbTag>();
+        return tid;
+    }
+    TypeId GetInstanceTypeId() const { return GetTypeId(); }
+    uint32_t GetSerializedSize() const { return 11; }
+    void Serialize(TagBuffer b) const {
+        b.WriteU32(seq); b.WriteU16(originalPort); b.WriteU16(ev);
+        b.WriteU8(lb); b.WriteU8(ecn); b.WriteU8(retransmitted);
+    }
+    void Deserialize(TagBuffer b) {
+        seq=b.ReadU32(); originalPort=b.ReadU16(); ev=b.ReadU16();
+        lb=b.ReadU8(); ecn=b.ReadU8(); retransmitted=b.ReadU8();
+    }
+    void Print(std::ostream& os) const { os << unsigned(lb) << ":" << ev << ":" << seq; }
+};
+
 class Settings {
    public:
     Settings() {}
@@ -120,9 +143,19 @@ class Settings {
     /* load balancer */
     // 0: flow ECMP, 2: DRILL, 3: Conga, 4: ConWeave
     static uint32_t lb_mode;
+    static uint64_t hybrid_collective_bytes;
 
     // for common setting
     static uint32_t packet_payload;
+
+    // for lb_mode=13 dToR bitmap feedback
+    // mode 0: legacy fixed 20us feedback + 1000-packet epoch reset
+    // mode 1: packet/time coupled feedback + reset after every feedback
+    static uint32_t dtor_feedback_mode;
+    static uint32_t dtor_feedback_pkts;
+    static double dtor_feedback_min_us;
+    static double dtor_feedback_max_us;
+    static uint32_t dtor_min_good_paths;
 
     // for statistic
     static uint32_t node_num;

@@ -29,11 +29,11 @@ class SwitchNode : public Node {
     bool m_ecnEnabled;
     uint32_t m_ccMode;
     uint32_t m_ackHighPrio;  // set high priority for ACK/NACK
-    // lb_mode=13: dToR 监控路径状态 <源 IP, 256位Bitmap>
+    // lb_mode=13: dToR 监控路径状态 <源 ToR/host key, 256位Bitmap>
     std::unordered_map<uint32_t, std::bitset<256>> m_dtor_path_states; 
     // lb_mode=13: 控制反馈频率 <源 IP, 上次反馈时间>
     std::unordered_map<uint32_t, Time> m_last_feedback_time;
-    // lb_mode=13: 全局包计数器，用于 Epoch 全局重置 <源 IP, 包总数>
+    // lb_mode=13: 周期包计数器 <源 ToR/host key, 周期包数>
     std::unordered_map<uint32_t, uint32_t> m_dtor_total_pkt_cnt;
 
    private:

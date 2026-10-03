@@ -49,6 +49,12 @@ ENABLE_IRN {enabled_irn}
 OOO_INTERVAL {ooo_interval}
 OOO_WINDOW_RATIO {ooo_ratio}
 
+DTOR_FEEDBACK_MODE {dtor_feedback_mode}
+DTOR_FEEDBACK_PKTS {dtor_feedback_pkts}
+DTOR_FEEDBACK_MIN_US {dtor_feedback_min_us}
+DTOR_FEEDBACK_MAX_US {dtor_feedback_max_us}
+DTOR_MIN_GOOD_PATHS {dtor_min_good_paths}
+
 CONWEAVE_TX_EXPIRY_TIME {cwh_tx_expiry_time}
 CONWEAVE_REPLY_TIMEOUT_EXTRA {cwh_extra_reply_deadline}
 CONWEAVE_PATH_PAUSE_TIME {cwh_path_pause_time}
@@ -92,7 +98,7 @@ KMAX_MAP {kmax_map}
 KMIN_MAP {kmin_map}
 PMAX_MAP {pmax_map}
 LOAD {load}
-RANDOM_SEED 1
+RANDOM_SEED {random_seed}
 """
 
 
@@ -149,6 +155,8 @@ def main():
                         default='9', help="the switch buffer size (MB) (default: 9)")
     parser.add_argument('--netload', dest='netload', action='store', type=int,
                         default=40, help="Network load at NIC to generate traffic (default: 40.0)")
+    parser.add_argument('--seed', dest='seed', action='store', type=int,
+                        default=1, help="simulator random seed (default: 1)")
     parser.add_argument('--bw', dest="bw", action='store',
                         default='100', help="the NIC bandwidth (Gbps) (default: 100)")
     parser.add_argument('--topo', dest='topo', action='store',
@@ -160,8 +168,19 @@ def main():
     parser.add_argument('--sw_monitoring_interval', dest='sw_monitoring_interval', action='store',
                         type=int, default=10000, help="interval of sampling statistics for queue status (default: 10000ns)")
     # ====== 新增参数 ======
-    parser.add_argument('--ooo_ratio', dest='ooo_ratio', action='store', type=float, default=0.5, help="OOO Window BDP Ratio")
+    parser.add_argument('--ooo_ratio', dest='ooo_ratio', action='store', type=float, default=0.4, help="OOO Window BDP Ratio")
     parser.add_argument('--ooo_interval', dest='ooo_interval', action='store', type=float, default=15.0, help="NACK generation interval (us)")
+    parser.add_argument('--dtor_feedback_mode', dest='dtor_feedback_mode', action='store',
+                        choices=['adaptive', 'legacy'], default='adaptive',
+                        help="dToR feedback policy for lb=dtor (default: adaptive)")
+    parser.add_argument('--dtor_feedback_pkts', dest='dtor_feedback_pkts', action='store',
+                        type=int, default=100, help="dToR adaptive feedback packet threshold (default: 100)")
+    parser.add_argument('--dtor_feedback_min_us', dest='dtor_feedback_min_us', action='store',
+                        type=float, default=8.0, help="dToR adaptive minimum feedback interval in us (default: 8.0)")
+    parser.add_argument('--dtor_feedback_max_us', dest='dtor_feedback_max_us', action='store',
+                        type=float, default=20.0, help="dToR adaptive maximum feedback interval in us (default: 20.0)")
+    parser.add_argument('--dtor_min_good_paths', dest='dtor_min_good_paths', action='store',
+                        type=int, default=16, help="dToR sender merge keeps gray paths only below this pool size (default: 16)")
     parser.add_argument('--id', dest='id', action='store', default='', help="Custom ID for output folder")
 
     # #### CONWEAVE PARAMETERS ####
@@ -370,6 +389,7 @@ def main():
     # queue monitoring
     qlen_mon_start = flowgen_start_time
     qlen_mon_end = flowgen_stop_time
+    dtor_feedback_mode = 0 if args.dtor_feedback_mode == 'legacy' else 1
 
     if (cc_mode == 1):  # DCQCN
         ai = 10 * bw / 25
@@ -383,11 +403,16 @@ def main():
         config = config_template.format(id=config_ID, topo=topo, flow=flow,
                                         qlen_mon_start=qlen_mon_start, qlen_mon_end=qlen_mon_end, flowgen_start_time=flowgen_start_time,
                                         flowgen_stop_time=flowgen_stop_time, sw_monitoring_interval=sw_monitoring_interval,
-                                        load=netload, buffer_size=buffer, lb_mode=lb_mode, cwh_tx_expiry_time=cwh_tx_expiry_time,
+                                        load=netload, random_seed=args.seed, buffer_size=buffer, lb_mode=lb_mode, cwh_tx_expiry_time=cwh_tx_expiry_time,
                                         cwh_extra_reply_deadline=cwh_extra_reply_deadline, cwh_default_voq_waiting_time=cwh_default_voq_waiting_time,
                                         cwh_path_pause_time=cwh_path_pause_time, cwh_extra_voq_flush_time=cwh_extra_voq_flush_time,
                                         enabled_pfc=enabled_pfc, enabled_irn=enabled_irn,
                                         ooo_interval=args.ooo_interval, ooo_ratio=args.ooo_ratio, # <== 加在这里
+                                        dtor_feedback_mode=dtor_feedback_mode,
+                                        dtor_feedback_pkts=args.dtor_feedback_pkts,
+                                        dtor_feedback_min_us=args.dtor_feedback_min_us,
+                                        dtor_feedback_max_us=args.dtor_feedback_max_us,
+                                        dtor_min_good_paths=args.dtor_min_good_paths,
                                         cc_mode=cc_mode,
                                         ai=ai, hai=hai, dctcp_ai=dctcp_ai,
                                         has_win=has_win, var_win=var_win,
@@ -451,4 +476,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

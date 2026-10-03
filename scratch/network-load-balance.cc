@@ -124,6 +124,11 @@ std::string dctcp_rate_ai = "1000Mb/s";
 // ====== 新增全局变量 ======
 double ooo_interval = 15.0; 
 double ooo_window_ratio = 0.5;
+uint32_t dtor_feedback_mode = 1;
+uint32_t dtor_feedback_pkts = 100;
+double dtor_feedback_min_us = 8.0;
+double dtor_feedback_max_us = 20.0;
+uint32_t dtor_min_good_paths = 16;
 
 bool clamp_target_rate = false, l2_back_to_zero = false;
 double error_rate_per_link = 0.0;
@@ -494,6 +499,12 @@ void qp_finish(FILE *fout, Ptr<RdmaQueuePair> q) {
                  (Settings::ip_to_node_id(q->sip), Settings::ip_to_node_id(q->dip), q->sport,
                   q->dport, q->m_size, q->startTime.GetTimeStep(),
                   (Simulator::Now() - q->startTime).GetTimeStep(), standalone_fct));
+    if (q->paperCc) {
+        std::cout << "PaperLbDiag flow=" << q->m_flow_id << " size=" << q->m_size
+                  << " lb=" << q->paperLb << " sends=" << q->paperSends
+                  << " unique_acks=" << q->paperAcked.size() << " ecn=" << q->paperEcnAcks
+                  << " cache_sends=" << q->paperCacheSends << " rtos=" << q->paperRtos << std::endl;
+    }
     Settings::cnt_finished_flows++;
     fflush(fout);
 }
@@ -775,6 +786,14 @@ int main(int argc, char *argv[]) {
                 conf >> v;
                 est_error_output_file = v;
                 std::cerr << "EST_ERROR_MON_FILE\t\t\t" << est_error_output_file << "\n";
+            } else if (key.compare("CONGA_FLOWLET_US") == 0) {
+                double value; conf >> value; conga_flowletTimeout = MicroSeconds(value);
+            } else if (key.compare("CONGA_DRE_US") == 0) {
+                double value; conf >> value; conga_dreTime = MicroSeconds(value);
+            } else if (key.compare("ONE_HOP_DELAY_NS") == 0) {
+                conf >> one_hop_delay;
+            } else if (key.compare("HYBRID_COLLECTIVE_BYTES") == 0) {
+                conf >> Settings::hybrid_collective_bytes;
             } else if (key.compare("LB_MODE") == 0) {
                 uint32_t v;
                 conf >> v;
@@ -1108,6 +1127,21 @@ int main(int argc, char *argv[]) {
             } else if (key.compare("OOO_WINDOW_RATIO") == 0) {
                 conf >> ooo_window_ratio;
                 std::cerr << "OOO_WINDOW_RATIO\t\t" << ooo_window_ratio << "\n";
+            } else if (key.compare("DTOR_FEEDBACK_MODE") == 0) {
+                conf >> dtor_feedback_mode;
+                std::cerr << "DTOR_FEEDBACK_MODE\t\t" << dtor_feedback_mode << "\n";
+            } else if (key.compare("DTOR_FEEDBACK_PKTS") == 0) {
+                conf >> dtor_feedback_pkts;
+                std::cerr << "DTOR_FEEDBACK_PKTS\t\t" << dtor_feedback_pkts << "\n";
+            } else if (key.compare("DTOR_FEEDBACK_MIN_US") == 0) {
+                conf >> dtor_feedback_min_us;
+                std::cerr << "DTOR_FEEDBACK_MIN_US\t\t" << dtor_feedback_min_us << "\n";
+            } else if (key.compare("DTOR_FEEDBACK_MAX_US") == 0) {
+                conf >> dtor_feedback_max_us;
+                std::cerr << "DTOR_FEEDBACK_MAX_US\t\t" << dtor_feedback_max_us << "\n";
+            } else if (key.compare("DTOR_MIN_GOOD_PATHS") == 0) {
+                conf >> dtor_min_good_paths;
+                std::cerr << "DTOR_MIN_GOOD_PATHS\t\t" << dtor_min_good_paths << "\n";
             }
 
             fflush(stdout);
@@ -1177,6 +1211,11 @@ int main(int argc, char *argv[]) {
     Settings::switch_num = switch_num;
     Settings::lb_mode = lb_mode;
     Settings::packet_payload = packet_payload_size;
+    Settings::dtor_feedback_mode = dtor_feedback_mode;
+    Settings::dtor_feedback_pkts = dtor_feedback_pkts;
+    Settings::dtor_feedback_min_us = dtor_feedback_min_us;
+    Settings::dtor_feedback_max_us = dtor_feedback_max_us;
+    Settings::dtor_min_good_paths = dtor_min_good_paths;
     // Settings::MTU = packet_payload_size + 48;  // for simplicity
     /*------------------------------------*/
 
@@ -1342,7 +1381,7 @@ int main(int argc, char *argv[]) {
                 // set pfc
                 uint64_t delay =
                     DynamicCast<QbbChannel>(dev->GetChannel())->GetDelay().GetTimeStep();
-                uint32_t headroom = rate * delay / 8 / 1000000000 * 2 + 2 * sw->m_mmu->MTU;
+                uint32_t headroom = rate * delay / 8 / 1000000000 * 2 + 2 * (packet_payload_size + 48);
                 sw->m_mmu->ConfigHdrm(j, headroom);
             }
             sw->m_mmu->ConfigNPort(sw->GetNDevices() - 1);
@@ -1388,6 +1427,30 @@ int main(int argc, char *argv[]) {
      *new rate can be divided by 2 at maximum)
      */
 
+    CalculateRoutes(n);
+    maxRtt = maxBdp = 0;
+    fprintf(stderr, "node_num=%d\n", node_num);
+    for (uint32_t i = 0; i < node_num; i++) {
+        if (n.Get(i)->GetNodeType() != 0) continue;
+        for (uint32_t j = i + 1; j < node_num; j++) {
+            if (n.Get(j)->GetNodeType() != 0) continue;
+            uint64_t delay = pairDelay[n.Get(i)][n.Get(j)];
+            uint64_t txDelay = pairTxDelay[n.Get(i)][n.Get(j)];
+            uint64_t rtt = delay * 2 + txDelay;
+            uint64_t bw = pairBw[n.Get(i)][n.Get(j)];
+            uint64_t bdp = rtt * bw / 1000000000 / 8;
+            pairBdp[n.Get(i)][n.Get(j)] = bdp;
+            pairBdp[n.Get(j)][n.Get(i)] = bdp;
+            pairRtt[n.Get(i)][n.Get(j)] = rtt;
+            pairRtt[n.Get(j)][n.Get(i)] = rtt;
+
+            if (bdp > maxBdp) maxBdp = bdp;
+            if (rtt > maxRtt) maxRtt = rtt;
+        }
+    }
+    fprintf(stderr, "maxRtt: %lu, maxBdp: %lu\n", maxRtt, maxBdp);
+
+    // Existing experiment profiles retain their BDP validation.
     // manually type BDP
     std::map<std::string, uint32_t> topo2bdpMap;
     topo2bdpMap[std::string("leaf_spine_128_100G_OS2")] = 104000;  // RTT=8320
@@ -1407,6 +1470,10 @@ int main(int argc, char *argv[]) {
             found_topo2bdpMap = true;
             break;
         }
+    }
+    if (!found_topo2bdpMap && cc_mode == 14) {
+        irn_bdp_lookup = maxBdp;
+        found_topo2bdpMap = true;
     }
     if (found_topo2bdpMap == false) {
         std::cout << __FILE__ << "(" << __LINE__ << ")"
@@ -1483,33 +1550,11 @@ int main(int argc, char *argv[]) {
     /**
      * @brief setup routing
      */
-    CalculateRoutes(n);
     SetRoutingEntries();
 
     /**
      * @brief get BDP and delay
      */
-    maxRtt = maxBdp = 0;
-    fprintf(stderr, "node_num=%d\n", node_num);
-    for (uint32_t i = 0; i < node_num; i++) {
-        if (n.Get(i)->GetNodeType() != 0) continue;
-        for (uint32_t j = i + 1; j < node_num; j++) {
-            if (n.Get(j)->GetNodeType() != 0) continue;
-            uint64_t delay = pairDelay[n.Get(i)][n.Get(j)];
-            uint64_t txDelay = pairTxDelay[n.Get(i)][n.Get(j)];
-            uint64_t rtt = delay * 2 + txDelay;
-            uint64_t bw = pairBw[n.Get(i)][n.Get(j)];
-            uint64_t bdp = rtt * bw / 1000000000 / 8;
-            pairBdp[n.Get(i)][n.Get(j)] = bdp;
-            pairBdp[n.Get(j)][n.Get(i)] = bdp;
-            pairRtt[n.Get(i)][n.Get(j)] = rtt;
-            pairRtt[n.Get(j)][n.Get(i)] = rtt;
-
-            if (bdp > maxBdp) maxBdp = bdp;
-            if (rtt > maxRtt) maxRtt = rtt;
-        }
-    }
-    fprintf(stderr, "maxRtt: %lu, maxBdp: %lu\n", maxRtt, maxBdp);
     assert(maxBdp == irn_bdp_lookup);
 
     std::cout << "Configuring switches" << std::endl;
@@ -1958,6 +2003,10 @@ int main(int argc, char *argv[]) {
     Simulator::Schedule(Seconds(flowgen_start_time) + MicroSeconds(1000), &PrintGlbTablesDump);
 
     Simulator::Run();
+    if (cc_mode == 14) {
+        std::cout << "PaperQueueDiag ingress_drops=" << Settings::dropped_pkt_sw_ingress
+                  << " egress_drops=" << Settings::dropped_pkt_sw_egress << std::endl;
+    }
 
     /*-----------------------------------------------------------------------------*/
     /*----- we don't need below. Just we can enforce to close this simulation. -----*/

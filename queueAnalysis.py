@@ -229,7 +229,7 @@ if __name__=="__main__":
     parser.add_argument('-fT', dest='time_limit_end', action='store', type=int, default=100000000000, help="only consider flows that finish before T, default=100 * 10^9 ns")
     parser.add_argument('-mT', dest='monitoring_interval', action='store', type=int, default=10000, help="monitoring interval, default 10us (10000)")
     args = parser.parse_args()
-    config_ID = int(args.id)
+    config_ID = args.id
     dirname = args.dir
     fdirname = args.fdir
     monitoringInterval = int(args.monitoring_interval)

@@ -94,7 +94,7 @@ uint32_t CustomHeader::GetSerializedSize (void) const{
 			len += tcp.length * 4;
 		else if (l3Prot == 0x11) // UDP
 			len += GetUdpHeaderSize();
-		else if (l3Prot == 0xFC || l3Prot == 0xFD)
+		else if (l3Prot == 0xFC || l3Prot == 0xFD || l3Prot == 0xFA)
 			len += GetAckSerializedSize();
 		else if (l3Prot == 0xFF)
 			len += 8;
@@ -168,7 +168,7 @@ void CustomHeader::Serialize (Buffer::Iterator start) const{
 		  i.WriteU8(cnp.ecnBits);
 		  i.WriteU16(cnp.qfb);
 		  i.WriteU16(cnp.total);
-	  }else if (l3Prot == 0xFC || l3Prot == 0xFD){ // ACK or NACK
+	  }else if (l3Prot == 0xFC || l3Prot == 0xFD || l3Prot == 0xFA){ // ACK, NACK, or bitmap feedback
 		  i.WriteU16(ack.sport);
 		  i.WriteU16(ack.dport);
 		  i.WriteU16(ack.flags);
@@ -306,7 +306,7 @@ CustomHeader::Deserialize (Buffer::Iterator start)
 		  cnp.qfb = i.ReadU16();
 		  cnp.total = i.ReadU16();
 		  l4Size = 8;
-	  }else if (l3Prot == 0xFC || l3Prot == 0xFD){ // ACK or NACK
+	  }else if (l3Prot == 0xFC || l3Prot == 0xFD || l3Prot == 0xFA){ // ACK, NACK, or bitmap feedback
 		  ack.sport = i.ReadU16();
 		  ack.dport = i.ReadU16();
 		  ack.flags = i.ReadU16();
@@ -333,7 +333,8 @@ uint8_t CustomHeader::GetIpv4EcnBits (void) const{
 }
 
 uint32_t CustomHeader::GetAckSerializedSize(void){
-	return sizeof(ack.sport) + sizeof(ack.dport) + sizeof(ack.flags) + sizeof(ack.pg) + sizeof(ack.seq) + IntHeader::GetStaticSize();
+	return sizeof(ack.sport) + sizeof(ack.dport) + sizeof(ack.flags) + sizeof(ack.pg) +
+		sizeof(ack.seq) + sizeof(ack.irnNack) + sizeof(ack.irnNackSize) + IntHeader::GetStaticSize();
 }
 
 uint32_t CustomHeader::GetUdpHeaderSize(void){
@@ -345,4 +346,3 @@ uint32_t CustomHeader::GetStaticWholeHeaderSize(void){
 }
 
 } // namespace ns3
-

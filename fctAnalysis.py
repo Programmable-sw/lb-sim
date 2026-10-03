@@ -43,7 +43,7 @@ if __name__=="__main__":
 	
 	args = parser.parse_args()
 
-	config_ID = int(args.id)
+	config_ID = args.id
 	dirname = args.dir
 	fdirname = args.fdir
 	OneBDP = int(args.bdp)
@@ -289,6 +289,5 @@ if __name__=="__main__":
 		for bkt in fct_cdf:
 			var = str(bkt[0]) + " " + str(bkt[1]) + " " + str(bkt[2]) + " " + str(bkt[3]) + "\n"
 			outfile_fct_large_absolute.write(var)
-
 
 

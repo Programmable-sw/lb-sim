@@ -12,6 +12,8 @@
 
 #include <climits> /* for CHAR_BIT */
 #include <vector>
+#include <map>
+#include "paper-lb-state.h"
 #include <set> // <=== 新增
 #include <bitset> // <=== 新增
 
@@ -89,6 +91,17 @@ class RdmaQueuePair : public Object {
     uint32_t lastPktSize;
     int32_t m_flow_id;
     Time m_timeout;
+    uint32_t paperLb = 0;
+    bool paperCc = false;
+    uint64_t paperSends = 0, paperEcnAcks = 0, paperCacheSends = 0, paperRtos = 0;
+    double paperCwnd = 1;
+    uint32_t paperMtu = 4096;
+    std::map<uint32_t, uint16_t> paperOutstanding;
+    std::set<uint32_t> paperAcked;
+    PaperReps paperReps;
+    PaperMpr paperMpr;
+    EventId paperBurst;
+    uint64_t paperBurstAt = 0;
     RepsState reps;       // REPS 连接状态
 
     // ====== 新增：用于 lb_mode=13 的 dToR 辅助 Bitmap ======

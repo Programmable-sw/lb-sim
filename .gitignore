@@ -13,3 +13,9 @@ analysis/figures/*.pdf
 .vscode
 __pycache__
 *.png
+
+/build-hybrid/
+
+# Local smoke-test logs and derived summaries.
+/experiments/smoke/output/
+/experiments/hybrid-lb/output/
