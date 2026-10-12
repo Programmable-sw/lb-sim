@@ -1,0 +1,23 @@
+{
+  "model_version": "queue-fixed-v6-ecn-calibration",
+  "parent": "queue-fixed-v5-spine-admission",
+  "network_data_binary_sha256": "dad9e7b9607867af049e2a0bac957e69a2d239823d6655d7689675d087ff4424",
+  "network_data_source_sha256": "4902b073be8b7d06a9abd4f4890fdcfe3bec40a7360d79f340780ba79a1fe89c",
+  "trace_analysis_binary_sha256": "8c76b2e3f9ca1c7adf3d7605f9d947fb129b7d94376751b5c20cbb6b6697609c",
+  "trace_analysis_source_sha256": "b85eeaa32b6a18ac6353daf076c90247ce1106768c6bc221034afd8f3ade4b3c",
+  "trace_analysis_network_behavior_changed": false,
+  "ecn": {
+    "leaf_kmin_kib": 32,
+    "leaf_kmax_kib": 128,
+    "spine_kmin_kib": 16,
+    "spine_kmax_kib": 64,
+    "pmax": 0.01,
+    "above_kmax_probability": 1.0,
+    "queue_sample": "pre_admission_data_memory_bytes"
+  },
+  "cc_model": "dcqcn_subset",
+  "default_trim_threshold_kib": 32,
+  "jct_event_horizon_us": 100000,
+  "v5_hybrid_jct_note": "JCT healthy flow names were not recognized by the prefix test, so v5 hybrid JCT used ECMP routing.",
+  "v5_p1_rate_note": "The old P1 phase table is an always-pretrim diagnostic and is not evidence for v5 paused JCT."
+}
