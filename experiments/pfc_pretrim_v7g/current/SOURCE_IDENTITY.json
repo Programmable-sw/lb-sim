@@ -1,0 +1,28 @@
+{
+  "parent": "results/v7g-ops-random-entropy-v1",
+  "parent_binary_sha256": "e3c001ae86c97b6d3e703424ee48d3eb125ba6fd39860f31d9840eaa0af444e3",
+  "packaging_only": true,
+  "source_files": {
+    "hybrid_qp_dispatch.h": "6abebcb24edd67843dc99ab830c2e50fafd03cb812c141016eee844e8ccd7374",
+    "sender_cap_resources.inc": "ce27fb45b67630ae15586248b1021a60a0d83e768be1b7ab11f04dfd85a9b2fc",
+    "v7g_protocol_wiring.h": "29afc8606121d1eddf1c1987915613c9062e738c2b26b7d77f5a760da3e63366",
+    "hybrid_stage_b_dispatch.h": "1eb51b4e99a9f532cefe551dd7f9f3aa2e608fa9ba13dc27afde0fbbc29b5d0c",
+    "special_union.h": "b59d33428315c8c314c0885625e44afb29382efae9eb5c9d1332af19291324f2",
+    "v7g_hybrid_b.cpp": "2f9a7da4a9da4585755e187844897867a3ee6ec12225dc011067f39168e2855e",
+    "unordered_transport.h": "d919341f26a76be8848abe512fe544a2727b6cca1fa0519abe7dfb49f993d956",
+    "victim_study_mmu.h": "567d804886dfadb7af9d5f6c57db4ba76305ca688a6a3925ff981b0cccef7577",
+    "v7g_unordered_protocols.h": "ca2c58bc484685564094b379db90847392d67f1ee1723779e4b67caf5c94eedc",
+    "common_nack_cc.h": "153a841f0b6ac928f60e474f3fd5fd4528d8612d0962d0cb26272f0f99db9bd3",
+    "sender_cap_policy.h": "0a36ab0aeeef6140d34b5c097653dec70bb10a7000fe5293f1f74c124fbb9560",
+    "ops_random_entropy.h": "274e087d21856c1514e0cdc155be3cd71be92401710193a3526fbc15e6263d3b",
+    "unordered_events.inc": "18cf6c065c805deed95d80da902d3129832bd33fd730a404785f09da19531595",
+    "light_hybrid_observer.h": "764d3d73a1449b940439704b90575f8a63cb8d86e70f8ae3c971a143510faddd"
+  },
+  "upstream_reps_commit": "b751588745b57e8264ce22d9a40df67bdedd62c0",
+  "excluded": [
+    "special case workloads/controllers",
+    "Gamma scans",
+    "all results and binaries",
+    "external reference repositories"
+  ]
+}
