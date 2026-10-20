@@ -8,3 +8,7 @@
 logout.dat
 /sim/datacenter/htsim_*
 /sim/tests/htsim_*
+
+# Local V7 readback exports (not source files).
+/V7_READBACK.zip
+/V7_READBACK/
