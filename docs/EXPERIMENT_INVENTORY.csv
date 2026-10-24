@@ -1,0 +1,13 @@
+experiment,path,result_tables
+alignment-preflight,experiments/pretrim/runs/alignment-preflight,FLOWS.csv;TRAFFIC.csv
+alignment-preflight-final,experiments/pretrim/runs/alignment-preflight-final,FLOWS.csv;TRAFFIC.csv
+artifact-aligned-matrix-v1,experiments/pretrim/runs/artifact-aligned-matrix-v1,ABSOLUTE_RESULTS.csv;BEFORE_AFTER_PAIRED.csv;MEAN_RESULTS.csv;PAIRED_STATISTICS.csv;PAIRED_VS_B0.csv
+artifact-alignment-final-seed41,experiments/pretrim/runs/artifact-alignment-final-seed41,BEFORE_AFTER_ABSOLUTE.csv
+artifact-alignment-seed41,experiments/pretrim/runs/artifact-alignment-seed41,BEFORE_AFTER_ABSOLUTE.csv
+artifact-alignment-verified-seed41,experiments/pretrim/runs/artifact-alignment-verified-seed41,BEFORE_AFTER_ABSOLUTE.csv
+b3-newops-pause-paired-v1,experiments/pretrim/runs/b3-newops-pause-paired-v1,ABSOLUTE_RESULTS.csv;PAIRED_RESULTS.csv
+b3-newops-pause-s400-v1,experiments/pretrim/runs/b3-newops-pause-s400-v1,ALL_RESULTS.csv;PAIRED_RESULTS.csv;S400_RESULTS.csv
+b3-s100-pause-duration-v1,experiments/pretrim/runs/b3-s100-pause-duration-v1,ABSOLUTE_RESULTS.csv
+b3-selective-summary-v1,experiments/pretrim/runs/b3-selective-summary-v1,ABSOLUTE_RESULTS.csv;MEAN_RESULTS.csv;PAIRED_RESULTS.csv
+b3-selective-zero-v1,experiments/pretrim/runs/b3-selective-zero-v1,ABSOLUTE_RESULTS.csv;MATCHED_SEED41_COMPARISON.csv
+selective-victim-pilot-v1,experiments/pretrim/runs/selective-victim-pilot-v1,B3_REUSED_RESULTS.csv;BASELINE_RESULTS.csv;C1-TRAFFIC.csv;C2-TRAFFIC.csv

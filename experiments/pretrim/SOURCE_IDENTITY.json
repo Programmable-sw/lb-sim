@@ -1,0 +1,27 @@
+{
+  "name": "pretrim",
+  "change": "Single Leaf per-egress actual-PFC-gated pretrim; default 100 KiB, threshold-only CLI (off disables). Retired Global/Ingress-risk/union implementations removed.",
+  "upstream_repository": "https://github.com/tommasobo/REPS_EuroSys_Artifact",
+  "upstream_commit": "b751588745b57e8264ce22d9a40df67bdedd62c0",
+  "binary_sha256": "d41fac16bfda559077af1cbd1f899718f02ea5e91b2cb484212112bb7296b52b",
+  "source_files": {
+    "hybrid_qp_dispatch.h": "546614fbbf0def4156f2a724796db7ad9ddd9239c8e2cb3368691a4bff57109e",
+    "sender_cap_resources.inc": "ce27fb45b67630ae15586248b1021a60a0d83e768be1b7ab11f04dfd85a9b2fc",
+    "protocol_wiring.h": "67e50c8a95121b455e30cda9f5bafb5a59265222958ce98233a51ca59c1dc9ab",
+    "hybrid_stage_b_dispatch.h": "544b9cc0d73b1029eb44f91e3946975619389c75eeccb08dbd9ca1f2dcdcc777",
+    "artifact_cc.h": "cc18c21523b4f371176556979fd7992393c493939d7bec5a870f420d18567b54",
+    "unordered_transport.h": "98a3d79336d42465b707ed3bcb8e4ed0672d4e2efdcfc8c42177ce5ec3c73680",
+    "victim_study_mmu.h": "bd5e61b1569b04304aa85cea411c5319854d4a1a3c505eb6491be8c9c1ed4a5d",
+    "main.cpp": "0c2cc22be3262dd29610ad3cbf0a6beac6ac2788fe6beaa4eb95e390f577020c",
+    "common_nack_cc.h": "e07f62120a59bbc5b8254f8318466c5caf8e7a30d721cec973380865dd0c4a66",
+    "sender_cap_policy.h": "833792b4750c5eaba7add7fa6134318d110059d9016aed3b9999357a1084a320",
+    "artifact_events.inc": "34171b5861547a07721990b8a5b6103dba39cac288beec84b06c360fd2701f0e",
+    "ops_random_entropy.h": "a75af9e638dca701735baee3396d7eecdd0d43a709223df6836e5c5b890251b1",
+    "unordered_events.inc": "3da174cd58f212bd0ea445a8915360bce0492f0daa42eadb62037714fa690c0a",
+    "protocols.h": "78518fbcaa2aab882a15e305e1cc79ce3d94de43ba47db6e662f720119cc5134",
+    "artifact_lb.h": "23dd926b46c5bb449466f9884f9aa70073621f2552a82b0e3c88c2a44fe87e86",
+    "light_hybrid_observer.h": "7b1d47fe71e4fb7fb35098c766678e0c58c2ad56fb0bf8220ff29403b6784f62",
+    "upstream/LICENSE": "de56c89b524b3e830a693141b8adb1e721ddade4853aa74ea576c20a8924cf91"
+  },
+  "limits_document": "../../docs/WATERLINE_INTERFACE.md"
+}

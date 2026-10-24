@@ -12,3 +12,21 @@ logout.dat
 # Local V7 readback exports (not source files).
 /V7_READBACK.zip
 /V7_READBACK/
+
+# Regenerable caches and build products throughout the workspace.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.a
+*.so
+
+# Local experiment outputs and third-party checkouts, not source inputs.
+/experiments/**/results/
+/experiments/**/references/
+/experiments/**/baselines/
+/output_metrics/
+/.local-archive/
+
+# Historical planning notes; already tracked documents remain tracked.
+/docs/superpowers/plans/
+/docs/superpowers/specs/

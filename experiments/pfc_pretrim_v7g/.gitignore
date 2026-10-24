@@ -1,5 +1,0 @@
-# Keep historical results and upstream clones locally, never stage their GBs.
-/results/
-/references/
-__pycache__/
-*.pyc

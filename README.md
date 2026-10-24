@@ -1,55 +1,74 @@
-# V7G：PFC 扩散与预 Trimming 仿真
+# PFC 扩散与预 Trimming 仿真
 
-基于 htsim，研究接收端消费受限引发的 PFC 扩散，以及预 Trimming 对受害通信、
-受阻通信和可靠恢复的影响。不以零 PFC 或所有业务均获益作为预设结论。
+基于 htsim，验证接收端消费受限时，Leaf 预 Trimming 能否限制 PFC 向上游扩散、
+改善受害通信，并量化受阻通信的裁剪与可靠恢复代价。
 
-## 当前实现
+## 模型
 
-- 网络：128 NIC、8 Leaf、8 Spine，400 Gbit/s；传播 500 ns、交换流水线 200 ns。
-- 交换机：20 MiB Buffer、动态 PFC、ECN 100/400 KiB（Pmax=20%），有限 Header 控制通道。
-- 端侧：真实 NIC RX/消费/PFC、live pacing、ACK/SACK、NACK、选择性重传和 RTO。
-- 传输：Unordered（16K PSN 追踪、64-bit SACK），保留 Limited OOO 对照。
-- 路由：ECMP、随机逐包 OPS，以及 MP-RDMA/REPS 适配；Hybrid 按 QP 分派 A2A 与 ECMP 背景流。
-- 预裁剪：Global/Selective 固定 egress 水线与 Selective Ingress-risk。
+- **网络**：128 NIC、8 Leaf、8 Spine，400 Gbit/s；链路传播 500 ns，交换流水线 200 ns。
+- **交换机**：每台 20 MiB Buffer，ECN 100/400 KiB、Pmax 20%；动态 PFC
+  `XOFF = 8192 B + shared_free / 8`，XOFF–XON 滞回 32 KiB（受 XON 下限约束）。
+- **端侧**：有限 NIC RX 与控制处理资源，真实 host 消费和 PFC；Unordered 接收、
+  16K PSN 追踪、64-bit SACK、选择性重传及 live pacing。
+- **Hybrid 路由**：A2A 使用 OPS、MP-RDMA 或 REPS，默认 CC 为 `dctcp_variant`；
+  背景长短流使用 per-flow ECMP/DCQCN。OPS 为每包随机 entropy 后哈希选路。
 
-MP-RDMA/REPS 为当前仿真适配，不宣称完整复现官方实现；GLB 仅有行为近似，
-完整交换机 GLB、SGLB/SyncMesh 和 NSCC 未接入。
+预 Trimming 仅作用于收到真实下游 PFC PAUSE 的 Leaf 出口，在完整包准入前判断：
+
+```text
+出口 PAUSE 有效 && 队列内存占用 + 新包内存大小 > 水线
+```
+
+满足条件时裁剪 Payload，Header 经有限控制队列到达接收端，触发 PRETRIM-NACK 和可靠恢复。
+新发与重传包使用相同条件，已排队的 Payload 不回收。PRETRIM-NACK 不直接降低 cwnd。
 
 ## 构建与运行
 
 需要 Python 3、make 和支持 C++11 的编译器。在仓库根目录执行：
 
 ```bash
-python3 experiments/pfc_pretrim_v7g/current/build.py --jobs 2
-python3 -m unittest discover -s experiments/pfc_pretrim_v7g/current/tests -p 'test_*.py'
+python3 experiments/pretrim/build.py --jobs 2
+python3 -m unittest discover -s experiments/pretrim/tests -p 'test_*.py'
 
-# 默认仅生成流量和命令；确认后增加 --execute 执行单点。
-python3 experiments/pfc_pretrim_v7g/current/run_regular.py \
-  --workload B3 --lb ops --policy IR --seed 41 \
-  --output experiments/pfc_pretrim_v7g/current/runs/B3-ops-IR-s41
+python3 experiments/pretrim/run_regular.py \
+  --workload B3 --lb ops --trim-threshold 100 --seed 41 \
+  --output experiments/pretrim/runs/B3-ops-s41 --execute
 ```
 
-常规负载包括 Hybrid A2A + 长短流（B3）、单受阻 NIC（W1）、A2A（W2）
-和多受阻 NIC（W3）。结果目录保留命令、构建哈希、实际配置、逐流 FCT 和事件日志。
+`--trim-threshold` 单位为 KiB，默认 `100`；`off` 关闭裁剪，`0` 表示在 PAUSE 期间
+裁剪所有新完整包。`--normal` 使用正常 NIC 消费，作为无故障参考。
+省略 `--execute` 只生成流量和运行命令。每次执行使用独立输出目录。
 
-## 仿真验证流程
+## 负载与观测指标
 
-1. 核对输入流量、实际路径和配置，先通过唯一交付、缓存守恒及最终排空检查。
-2. 验证因果链：消费下降 → NIC PFC → Leaf 积压 → Fabric PFC → Victim 实际等待。
-3. 同 LB、同 seed 配对 NoFault/B0、Fault/B0 和 Fault/Trimming，其他参数保持一致。
-4. 比较两组完整 A2A JCT、Victim/Blocked 长短流 FCT，同时统计 PAUSE、裁剪、重传和 RTO。
-5. 保留未完成与负收益样本；先计算每 seed 指标，再做配对统计，不混用不同构建结果。
+常规负载提供 B3（Hybrid）、W1（单受阻 NIC）、W2（A2A）及 W3-2/W3-4（多受阻 NIC）。
+B3 共 658 QP、约 235 MiB Payload，包含两组独立 A2A、背景长流及周期突发短流。
+默认 NIC112/113 在 50–250 μs 停止 host 消费，PFC 由真实 RX 占用达到 XOFF 自动触发。
 
-减少 PFC 不等于改善应用性能；没有真实扩散或受害证据时，不认定为隔离成功。
+| 通信 | B3 业务组成 | 指标 |
+|---|---|---|
+| A2A-A | 18 NIC、306 QP，包含受阻 NIC112/113 | 完整 JCT |
+| A2A-B | 16 个健康 NIC、240 QP | 完整 JCT |
+| Victim | 发往同 Leaf 健康 NIC 的长短流 | 长、短流分别计算平均 FCT |
+| Blocked | 发往受阻 NIC 的长短流 | 长、短流分别计算平均 FCT |
 
-## htsim 上游背景
+暂停时长配对示例：
 
-htsim is a high performance discrete event simulator, inspired by ns2, but much faster, primarily intended to examine congestion control algorithm behaviour.  It was originally written by [Mark Handley](http://www0.cs.ucl.ac.uk/staff/M.Handley/) to allow [Damon Wishik](https://www.cl.cam.ac.uk/~djw1005/) to examine TCP stability issues when large numbers of flows are multiplexed.  It was extended by [Costin Raiciu](http://nets.cs.pub.ro/~costin/) to examine [Multipath TCP performance](http://nets.cs.pub.ro/~costin/files/mptcp-nsdi.pdf) during the MPTCP standardization process, and models of datacentre networks were added to [examine multipath transport](http://nets.cs.pub.ro/~costin/files/mptcp_dc_sigcomm.pdf) in a variety of datacentre topologies.  [NDP](http://nets.cs.pub.ro/~costin/files/ndp.pdf) was developed using htsim, and simple models of DCTCP, DCQCN were added for comparison.  Later htsim was adopted by Correct Networks (now part of Broadcom) to develop [EQDS](http://nets.cs.pub.ro/~costin/files/eqds.pdf), and switch models were improved to allow a variety of forwarding methods.  Support for a simple RoCE model, PFC, Swift and HPCC were added.
+```bash
+python3 experiments/pretrim/run_pause_sweep.py \
+  --trim-threshold off 100 --pause-us 50 100 200 \
+  --output experiments/pretrim/runs/pause-comparison --execute
+```
 
-## Getting Started
+## 验证流程
 
-There are some limited instructions in the [wiki](https://github.com/Broadcom/csg-htsim/wiki).  
+1. 检查实际配置与路径，确认唯一可靠交付、缓存守恒和最终排空。
+2. 核对事件链：消费下降 → NIC PFC → Leaf 积压 → 上游 PFC → Victim 实际等待。
+3. 同 LB、同 seed、同负载配对无故障参考、无裁剪对照和预 Trimming 实验。
+4. 比较通信完成时间，同时记录 Fabric PAUSE、裁剪、重复裁剪、重传、RTO 和资源拒收。
 
-htsim is written in C++, and has no dependencies.  It should compile and run with g++ or clang on MacOS or Linux.  To compile htsim, cd into the sim directory and run make.
+保留未完成与负收益样本；不同构建分开统计。减少 PFC 不直接等于改善业务性能。
+输出目录保存命令、构建哈希、实际配置、逐流结果和 trace；`runs/` 与构建产物不纳入 Git。
 
-To get started with running experiments, take a look in the experiments directory where there are some examples.  These examples generally require bash, python3 and gnuplot.
+实现依据与适配边界：[MP-RDMA/REPS 与 CC](docs/ARTIFACT_ALIGNMENT.md)、
+[OPS](docs/OPS_ARTIFACT_ALIGNMENT.md)、[水线接口](docs/WATERLINE_INTERFACE.md)。
